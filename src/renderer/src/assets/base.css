@@ -56,6 +56,10 @@
   --radius: 0.5rem;
 }
 
+:root {
+  color-scheme: dark;
+}
+
 @layer base {
   * {
     @apply border-border;
@@ -63,4 +67,27 @@
   body {
     @apply bg-background text-foreground;
   }
+}
+
+* {
+  scrollbar-width: thin;
+  scrollbar-color: hsl(var(--secondary)) hsl(var(--background));
+}
+
+*::-webkit-scrollbar {
+  width: 10px;
+}
+
+*::-webkit-scrollbar-track {
+  background: hsl(var(--background));
+}
+
+*::-webkit-scrollbar-thumb {
+  background: hsl(var(--secondary));
+  border-radius: 999px;
+  border: 2px solid hsl(var(--background));
+}
+
+*::-webkit-scrollbar-thumb:hover {
+  background: hsl(var(--secondary-foreground));
 }

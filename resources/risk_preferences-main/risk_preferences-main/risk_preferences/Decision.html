@@ -1,0 +1,43 @@
+{{ extends "global/Page.html" }} {{ load otree }} {{ block title }} 您的决策 {{ endblock }} {{ block
+content }}
+<p>请在下面10个决策中，每次选择选项A或选项B：</p>
+
+<table class="table table-striped">
+  <thead>
+    <tr>
+      <th>决策</th>
+      <th>高收益概率</th>
+      <th>选项A（安全）</th>
+      <th>选项B（风险）</th>
+      <th>您的选择</th>
+    </tr>
+  </thead>
+  <tbody>
+    {{ for prob_pair in probability_pairs }}
+    <tr>
+      <td>{{ forloop.counter }}</td>
+      <td>{{ prob_pair.0 }}%</td>
+      <td>
+        {{ safe_option_a }} 概率 {{ prob_pair.0 }}%<br />{{ safe_option_b }} 概率 {{ prob_pair.1 }}%
+      </td>
+      <td>
+        {{ risky_option_a }} 概率 {{ prob_pair.0 }}%<br />{{ risky_option_b }} 概率 {{ prob_pair.1
+        }}%
+      </td>
+      <td>
+        {{ if forloop.counter == 1 }}{{ formfield player.decision_1 }}{{ endif }} {{ if
+        forloop.counter == 2 }}{{ formfield player.decision_2 }}{{ endif }} {{ if forloop.counter ==
+        3 }}{{ formfield player.decision_3 }}{{ endif }} {{ if forloop.counter == 4 }}{{ formfield
+        player.decision_4 }}{{ endif }} {{ if forloop.counter == 5 }}{{ formfield player.decision_5
+        }}{{ endif }} {{ if forloop.counter == 6 }}{{ formfield player.decision_6 }}{{ endif }} {{
+        if forloop.counter == 7 }}{{ formfield player.decision_7 }}{{ endif }} {{ if forloop.counter
+        == 8 }}{{ formfield player.decision_8 }}{{ endif }} {{ if forloop.counter == 9 }}{{
+        formfield player.decision_9 }}{{ endif }} {{ if forloop.counter == 10 }}{{ formfield
+        player.decision_10 }}{{ endif }}
+      </td>
+    </tr>
+    {{ endfor }}
+  </tbody>
+</table>
+
+{{ next_button }} {{ endblock }}

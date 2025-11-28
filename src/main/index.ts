@@ -2,7 +2,7 @@ import { app, shell, BrowserWindow, ipcMain } from 'electron'
 import { join } from 'path'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
 import icon from '../../resources/icon.png?asset'
-import { setupOtreeHandlers } from './otree-controller' // Import our new file
+import { setupOtreeHandlers, killOtreeProcess } from './otree-controller' // Import our new file
 
 function createWindow(): void {
   // Create the browser window.
@@ -67,9 +67,14 @@ app.whenReady().then(() => {
 // for applications and their menu bar to stay active until the user quits
 // explicitly with Cmd + Q.
 app.on('window-all-closed', () => {
+  killOtreeProcess()
   if (process.platform !== 'darwin') {
     app.quit()
   }
+})
+
+app.on('before-quit', () => {
+  killOtreeProcess()
 })
 
 // In this file you can include the rest of your app's specific main process

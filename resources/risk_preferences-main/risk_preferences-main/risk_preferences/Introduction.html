@@ -1,0 +1,28 @@
+{{ extends "global/Page.html" }}
+{{ load otree }}
+
+{{ block title }}
+    风险偏好实验介绍
+{{ endblock }}
+
+{{ block content }}
+    <div class="card">
+        <div class="card-body">
+            <h5 class="card-title">欢迎参加风险偏好实验</h5>
+            <p>
+                在本实验中，您将连续做出10个决策，每次在两个选项之间选择：
+                <ul>
+                    <li><strong>选项A（安全）：</strong> {{ C.safe_option_a }} 的概率为P%，或 {{ C.safe_option_b }} 的概率为(100-P)%</li>
+                    <li><strong>选项B（风险）：</strong> {{ C.risky_option_a }} 的概率为P%，或 {{ C.risky_option_b }} 的概率为(100-P)%</li>
+                </ul>
+            </p>
+            <p>
+                概率P在10个决策中从10%递增到100%。
+                实验结束时，系统会随机选择一个决策用于支付，
+                结果将根据该决策对应的概率来确定。
+            </p>
+        </div>
+    </div>
+
+    {{ next_button }}
+{{ endblock }}

@@ -1,0 +1,14 @@
+{{ extends "global/Page.html" }} {{ load otree }} {{ block title }} 实验结果 {{ endblock }} {{ block
+content }}
+<div class="card">
+  <div class="card-body">
+    <h5 class="card-title">支付计算</h5>
+    <p>系统随机选择了决策 {{ paying_decision }} 用于支付。</p>
+    <p>在这个决策中，高收益的概率为 {{ probability }}%。</p>
+    <p>您选择了 {{ choice }}。</p>
+    <p>结果是：{{ outcome }}收益。</p>
+    <p>您的报酬为：{{ payoff }}。</p>
+  </div>
+</div>
+
+{{ next_button }} {{ endblock }}

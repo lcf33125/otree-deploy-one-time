@@ -238,11 +238,24 @@ export const setupOtreeHandlers = (mainWindow: BrowserWindow): void => {
           sendStatus(mainWindow, 'Virtual environment created.')
         }
 
-        // 2. Install requirements using venv pip
-        sendStatus(mainWindow, 'Installing requirements in venv...')
+        // 2. Check if requirements.txt exists
+        const requirementsPath = path.join(projectPath, 'requirements.txt')
+        const hasRequirements = fs.existsSync(requirementsPath)
 
         const cmd = paths.pip
-        const args = ['install', '-r', 'requirements.txt']
+        let args: string[]
+
+        if (hasRequirements) {
+          sendStatus(mainWindow, 'Installing requirements from requirements.txt...')
+          args = ['install', '-r', 'requirements.txt']
+        } else {
+          sendStatus(
+            mainWindow,
+            'No requirements.txt found. Installing otree and common dependencies...'
+          )
+          // Install otree and commonly needed packages
+          args = ['install', 'otree']
+        }
 
         const installProcess = spawn(cmd, args, { cwd: projectPath, shell: true })
 
@@ -260,7 +273,11 @@ export const setupOtreeHandlers = (mainWindow: BrowserWindow): void => {
 
         installProcess.on('close', (code: number | null) => {
           if (code === 0) {
-            sendStatus(mainWindow, 'Requirements installed successfully in venv.')
+            if (hasRequirements) {
+              sendStatus(mainWindow, 'Requirements installed successfully in venv.')
+            } else {
+              sendStatus(mainWindow, 'otree installed successfully in venv.')
+            }
             mainWindow.webContents.send('otree:install-status', 'success')
           } else {
             sendStatus(mainWindow, `Installation failed with code ${code}`)
@@ -309,6 +326,17 @@ export const setupOtreeHandlers = (mainWindow: BrowserWindow): void => {
       currentProjectPath = projectPath
       initLogFile(projectPath, 'server')
       const paths = getVenvPaths(projectPath)
+
+      // Check if otree is installed
+      if (!fs.existsSync(paths.otree)) {
+        sendStatus(
+          mainWindow,
+          'ERROR: otree not found in virtual environment. Please install dependencies first.'
+        )
+        mainWindow.webContents.send('otree:status', 'stopped')
+        return
+      }
+
       sendStatus(mainWindow, 'Starting oTree server from venv...')
 
       // Find a free port (prefer 8000)

@@ -13,6 +13,23 @@ const api = {
   stopOtree: (path) => ipcRenderer.send('otree:stop', path),
   scanPythonVersions: () => ipcRenderer.invoke('otree:scan-python-versions'),
   getDocumentsPath: () => ipcRenderer.invoke('otree:get-documents-path'),
+  getVenvInfo: (path) => ipcRenderer.invoke('otree:get-venv-info', path),
+  cleanVenv: (path) => ipcRenderer.invoke('otree:clean-venv', path),
+  openUrl: (url) => ipcRenderer.send('open-url', url),
+
+  // Python Version Management
+  getPythonVersions: () => ipcRenderer.invoke('python:get-versions'),
+  getAvailablePythonVersions: () => ipcRenderer.invoke('python:get-available-versions'),
+  scanSystemPythons: () => ipcRenderer.invoke('python:scan-system'),
+  downloadPython: (version) => ipcRenderer.send('python:download', version),
+  setProjectPythonVersion: (projectHash, version) =>
+    ipcRenderer.invoke('python:set-project-version', projectHash, version),
+  getProjectPythonVersion: (projectHash) =>
+    ipcRenderer.invoke('python:get-project-version', projectHash),
+  getPythonPath: (version) => ipcRenderer.invoke('python:get-path', version),
+  deletePython: (version) => ipcRenderer.invoke('python:delete', version),
+  isPythonInstalled: (version) => ipcRenderer.invoke('python:is-installed', version),
+  repairPython: (version) => ipcRenderer.invoke('python:repair', version),
 
   // Listeners
   onLogs: (callback) => ipcRenderer.on('otree:logs', (_event, value) => callback(value)),
@@ -21,11 +38,17 @@ const api = {
     ipcRenderer.on('otree:install-status', (_event, value) => callback(value)),
   onCheckStatus: (callback) =>
     ipcRenderer.on('otree:check-status', (_event, value) => callback(value)),
+  onDownloadProgress: (callback) =>
+    ipcRenderer.on('python:download-progress', (_event, value) => callback(value)),
+  onDownloadStatus: (callback) =>
+    ipcRenderer.on('python:download-status', (_event, value) => callback(value)),
   removeAllListeners: () => {
     ipcRenderer.removeAllListeners('otree:logs')
     ipcRenderer.removeAllListeners('otree:status')
     ipcRenderer.removeAllListeners('otree:install-status')
     ipcRenderer.removeAllListeners('otree:check-status')
+    ipcRenderer.removeAllListeners('python:download-progress')
+    ipcRenderer.removeAllListeners('python:download-status')
   }
 }
 

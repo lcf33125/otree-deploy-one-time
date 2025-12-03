@@ -5,6 +5,8 @@ import yaml from 'yaml'
 import { spawn, ChildProcess, exec } from 'child_process'
 import net from 'net'
 import util from 'util'
+import crypto from 'crypto'
+import { getPythonManager } from './python-manager'
 
 const execAsync = util.promisify(exec)
 
@@ -130,11 +132,25 @@ export const killOtreeProcess = (mainWindow?: BrowserWindow): void => {
 }
 
 // Helper: Get venv paths
+// Virtual environments are stored in app's data directory to avoid polluting user projects
+// Each project gets its own venv identified by a hash of its absolute path
 const getVenvPaths = (
   projectPath: string
 ): { python: string; pip: string; otree: string; venvDir: string } => {
   const isWin = process.platform === 'win32'
-  const venvDir = path.join(projectPath, 'venv')
+  
+  // Create a hash of the project path for unique venv identification
+  const projectHash = crypto
+    .createHash('md5')
+    .update(projectPath)
+    .digest('hex')
+    .substring(0, 8)
+  
+  // Store all venvs in app's userData directory
+  // This keeps user projects clean and centralizes venv management
+  const venvBaseDir = path.join(app.getPath('userData'), 'venvs')
+  const venvDir = path.join(venvBaseDir, projectHash)
+  
   const binDir = isWin ? path.join(venvDir, 'Scripts') : path.join(venvDir, 'bin')
 
   return {
@@ -224,18 +240,101 @@ export const setupOtreeHandlers = (mainWindow: BrowserWindow): void => {
 
         // 1. Create venv if it doesn't exist
         if (!fs.existsSync(paths.venvDir)) {
-          sendStatus(mainWindow, `Creating virtual environment (venv) using ${pythonCmd}...`)
-          await new Promise<void>((resolve, reject) => {
-            const venvProcess = spawn(pythonCmd, ['-m', 'venv', 'venv'], {
-              cwd: projectPath,
-              shell: true
+          sendStatus(mainWindow, `Creating virtual environment using ${pythonCmd}...`)
+          sendStatus(mainWindow, `Location: ${paths.venvDir}`)
+          
+          // Ensure parent directory exists
+          await fs.ensureDir(path.dirname(paths.venvDir))
+          
+          // Check if this is a managed Python (embeddable) - use virtualenv instead of venv
+          const isManagedPython = pythonCmd.includes('otree-deploy-one-click\\pythons') || 
+                                   pythonCmd.includes('otree-deploy-one-click/pythons')
+          
+          if (isManagedPython) {
+            // Use virtualenv for embeddable Python
+            const pythonDir = path.dirname(pythonCmd)
+            const virtualenvExe = path.join(pythonDir, 'Scripts', 'virtualenv.exe')
+            const pipExe = path.join(pythonDir, 'Scripts', 'pip.exe')
+            
+            // Check if virtualenv is installed, install if not
+            if (!fs.existsSync(virtualenvExe)) {
+              sendStatus(mainWindow, 'Installing virtualenv (first-time setup)...')
+              await new Promise<void>((resolve, reject) => {
+                const installProcess = spawn(pipExe, ['install', 'virtualenv'], {
+                  shell: true,
+                  cwd: pythonDir
+                })
+                
+                let output = ''
+                installProcess.stdout?.on('data', (data) => {
+                  output += data.toString()
+                  logToUIAndFile(mainWindow, data.toString())
+                })
+                installProcess.stderr?.on('data', (data) => {
+                  output += data.toString()
+                  logToUIAndFile(mainWindow, data.toString())
+                })
+                
+                installProcess.on('close', (code) => {
+                  if (code === 0) {
+                    sendStatus(mainWindow, 'virtualenv installed successfully.')
+                    resolve()
+                  } else {
+                    reject(new Error(`Failed to install virtualenv, code ${code}`))
+                  }
+                })
+              })
+            }
+            
+            sendStatus(mainWindow, 'Creating virtual environment with virtualenv...')
+            await new Promise<void>((resolve, reject) => {
+              const venvProcess = spawn(virtualenvExe, [paths.venvDir], {
+                shell: true,
+                cwd: pythonDir
+              })
+              
+              let output = ''
+              venvProcess.stdout?.on('data', (data) => {
+                output += data.toString()
+                logToUIAndFile(mainWindow, data.toString())
+              })
+              venvProcess.stderr?.on('data', (data) => {
+                output += data.toString()
+                logToUIAndFile(mainWindow, data.toString())
+              })
+              
+              venvProcess.on('close', (code) => {
+                if (code === 0) resolve()
+                else reject(new Error(`Failed to create venv with virtualenv, code ${code}`))
+              })
             })
-            venvProcess.on('close', (code) => {
-              if (code === 0) resolve()
-              else reject(new Error(`Failed to create venv, code ${code}`))
+          } else {
+            // Use standard venv for system Python
+            await new Promise<void>((resolve, reject) => {
+              const venvProcess = spawn(pythonCmd, ['-m', 'venv', paths.venvDir], {
+                shell: true
+              })
+              
+              let output = ''
+              venvProcess.stdout?.on('data', (data) => {
+                output += data.toString()
+                logToUIAndFile(mainWindow, data.toString())
+              })
+              venvProcess.stderr?.on('data', (data) => {
+                output += data.toString()
+                logToUIAndFile(mainWindow, data.toString())
+              })
+              
+              venvProcess.on('close', (code) => {
+                if (code === 0) resolve()
+                else reject(new Error(`Failed to create venv, code ${code}`))
+              })
             })
-          })
-          sendStatus(mainWindow, 'Virtual environment created.')
+          }
+          
+          sendStatus(mainWindow, 'Virtual environment created successfully.')
+        } else {
+          sendStatus(mainWindow, `Using existing virtual environment at: ${paths.venvDir}`)
         }
 
         // 2. Check if requirements.txt exists
@@ -380,6 +479,12 @@ export const setupOtreeHandlers = (mainWindow: BrowserWindow): void => {
         otreeProcess.stdout.on('data', (data: Buffer) => {
           const log = data.toString()
           logToUIAndFile(mainWindow, log)
+          
+          // Inject system message when detecting Control+C instruction
+          if (log.includes('To quit the server, press Control+C') || log.includes('press Control+C')) {
+            logToUIAndFile(mainWindow, '[SYSTEM] ⚠️  In this GUI app, use the "Stop Server" button instead of Control+C.\n')
+          }
+          
           checkRunning(log)
         })
       }
@@ -388,6 +493,12 @@ export const setupOtreeHandlers = (mainWindow: BrowserWindow): void => {
         otreeProcess.stderr.on('data', (data: Buffer) => {
           const log = data.toString()
           logToUIAndFile(mainWindow, log)
+          
+          // Inject system message when detecting Control+C instruction
+          if (log.includes('To quit the server, press Control+C') || log.includes('press Control+C')) {
+            logToUIAndFile(mainWindow, '[SYSTEM] ⚠️  In this GUI app, use the "Stop Server" button instead of Control+C.\n')
+          }
+          
           checkRunning(log)
         })
       }
@@ -483,6 +594,181 @@ export const setupOtreeHandlers = (mainWindow: BrowserWindow): void => {
   // 5. Handler: Get Documents Path (for default suggestion)
   ipcMain.handle('otree:get-documents-path', () => {
     return path.join(app.getPath('documents'), 'oTreeProjects')
+  })
+
+  // 6. Handler: Get Virtual Environment Info
+  ipcMain.handle('otree:get-venv-info', (_event, projectPath: string) => {
+    const paths = getVenvPaths(projectPath)
+    const exists = fs.existsSync(paths.venvDir)
+    
+    return {
+      venvDir: paths.venvDir,
+      exists,
+      venvBaseDir: path.join(app.getPath('userData'), 'venvs')
+    }
+  })
+
+  // 7. Handler: Clean Virtual Environment
+  ipcMain.handle('otree:clean-venv', async (_event, projectPath: string) => {
+    try {
+      const paths = getVenvPaths(projectPath)
+      
+      if (fs.existsSync(paths.venvDir)) {
+        await fs.remove(paths.venvDir)
+        return { success: true, message: 'Virtual environment removed successfully.' }
+      } else {
+        return { success: true, message: 'No virtual environment found for this project.' }
+      }
+    } catch (error) {
+      return { 
+        success: false, 
+        message: error instanceof Error ? error.message : 'Unknown error occurred' 
+      }
+    }
+  })
+
+  // === Python Version Management Handlers ===
+  const pythonManager = getPythonManager()
+
+  // 8. Handler: Get available Python versions
+  ipcMain.handle('python:get-versions', async () => {
+    return pythonManager.getAllPythons()
+  })
+
+  // 9. Handler: Get downloadable Python versions
+  ipcMain.handle('python:get-available-versions', async () => {
+    return pythonManager.getAvailableVersions()
+  })
+
+  // 10. Handler: Scan system for Python installations
+  ipcMain.handle('python:scan-system', async () => {
+    try {
+      return await pythonManager.scanSystemPythons()
+    } catch (error) {
+      console.error('Error scanning system Pythons:', error)
+      return []
+    }
+  })
+
+  // 11. Handler: Download a Python version
+  ipcMain.on('python:download', async (_event: IpcMainEvent, version: string) => {
+    try {
+      mainWindow.webContents.send('python:download-status', {
+        version,
+        status: 'downloading',
+        progress: 0
+      })
+
+      const pythonPath = await pythonManager.downloadPython(version, (progress) => {
+        mainWindow.webContents.send('python:download-progress', { version, progress })
+      })
+
+      mainWindow.webContents.send('python:download-status', {
+        version,
+        status: 'complete',
+        path: pythonPath
+      })
+    } catch (error) {
+      mainWindow.webContents.send('python:download-status', {
+        version,
+        status: 'error',
+        error: error instanceof Error ? error.message : 'Unknown error'
+      })
+    }
+  })
+
+  // 12. Handler: Set project's Python version preference
+  ipcMain.handle(
+    'python:set-project-version',
+    async (_event, projectHash: string, version: string) => {
+      try {
+        pythonManager.setProjectPython(projectHash, version)
+        return { success: true }
+      } catch (error) {
+        return {
+          success: false,
+          error: error instanceof Error ? error.message : 'Unknown error'
+        }
+      }
+    }
+  )
+
+  // 13. Handler: Get project's Python version preference
+  ipcMain.handle('python:get-project-version', async (_event, projectHash: string) => {
+    return pythonManager.getProjectPython(projectHash)
+  })
+
+  // 14. Handler: Get Python path for a version
+  ipcMain.handle('python:get-path', async (_event, version: string) => {
+    return pythonManager.getPythonPath(version)
+  })
+
+  // 15. Handler: Delete a managed Python version
+  ipcMain.handle('python:delete', async (_event, version: string) => {
+    try {
+      await pythonManager.deletePython(version)
+      return { success: true }
+    } catch (error) {
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : 'Unknown error'
+      }
+    }
+  })
+
+  // 16. Handler: Check if a version is installed
+  ipcMain.handle('python:is-installed', async (_event, version: string) => {
+    return pythonManager.isVersionInstalled(version)
+  })
+
+  // 17. Handler: Repair a managed Python (reinstall virtualenv)
+  ipcMain.handle('python:repair', async (_event, version: string) => {
+    try {
+      const pythonPath = pythonManager.getPythonPath(version)
+      if (!pythonPath) {
+        return { success: false, error: 'Python version not found' }
+      }
+
+      // Check if it's a managed Python
+      if (!pythonPath.includes('otree-deploy-one-click\\pythons') && 
+          !pythonPath.includes('otree-deploy-one-click/pythons')) {
+        return { success: false, error: 'Can only repair managed Python versions' }
+      }
+
+      const pythonDir = path.dirname(pythonPath)
+      const pipExe = path.join(pythonDir, 'Scripts', 'pip.exe')
+
+      // Reinstall virtualenv
+      await new Promise<void>((resolve, reject) => {
+        const proc = spawn(pipExe, ['install', '--force-reinstall', 'virtualenv'], {
+          shell: true,
+          cwd: pythonDir
+        })
+
+        let output = ''
+        proc.stdout?.on('data', (data) => {
+          output += data.toString()
+        })
+        proc.stderr?.on('data', (data) => {
+          output += data.toString()
+        })
+
+        proc.on('close', (code) => {
+          if (code === 0) {
+            resolve()
+          } else {
+            reject(new Error(`Failed to repair Python: ${output}`))
+          }
+        })
+      })
+
+      return { success: true }
+    } catch (error) {
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : 'Unknown error'
+      }
+    }
   })
 }
 

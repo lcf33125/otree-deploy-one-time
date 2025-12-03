@@ -23,9 +23,10 @@ jobs:
           - os: windows-latest
             platform: win
             build_script: 'build:win'
-          - os: ubuntu-latest
-            platform: linux
-            build_script: 'build:linux'
+          # Temporarily disabled - uncomment when needed
+          # - os: ubuntu-latest
+          #   platform: linux
+          #   build_script: 'build:linux'
     
     steps:
       - name: Checkout code
@@ -61,17 +62,18 @@ jobs:
           retention-days: 5
           if-no-files-found: error
 
-      - name: Upload Linux artifacts
-        if: matrix.platform == 'linux'
-        uses: actions/upload-artifact@v4
-        with:
-          name: linux-packages
-          path: |
-            dist/*.AppImage
-            dist/*.deb
-            dist/*.snap
-          retention-days: 5
-          if-no-files-found: warn
+      # Temporarily disabled - uncomment when Linux builds are re-enabled
+      # - name: Upload Linux artifacts
+      #   if: matrix.platform == 'linux'
+      #   uses: actions/upload-artifact@v4
+      #   with:
+      #     name: linux-packages
+      #     path: |
+      #       dist/*.AppImage
+      #       dist/*.deb
+      #       dist/*.snap
+      #     retention-days: 5
+      #     if-no-files-found: warn
 
   release:
     name: Create Release

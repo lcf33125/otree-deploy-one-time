@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react'
 import LogViewer from './components/LogViewer'
 import SettingsModal from './components/SettingsModal'
+import PythonVersionManager from './components/PythonVersionManager'
 
 // 1. Define the shape of the API exposed from preload.js
 interface IElectronAPI {
@@ -12,10 +13,39 @@ interface IElectronAPI {
   stopOtree: (path: string) => void
   scanPythonVersions: () => Promise<{ version: string; path: string }[]>
   getDocumentsPath: () => Promise<string>
+  getVenvInfo: (path: string) => Promise<{ venvDir: string; exists: boolean; venvBaseDir: string }>
+  cleanVenv: (path: string) => Promise<{ success: boolean; message: string }>
+  openUrl: (url: string) => void
+  // Python Version Management
+  getPythonVersions: () => Promise<{
+    managed: Array<{ version: string; path: string; source: string; downloadDate?: string }>
+    system: Array<{ version: string; path: string; source: string; downloadDate?: string }>
+  }>
+  getAvailablePythonVersions: () => Promise<string[]>
+  scanSystemPythons: () => Promise<
+    Array<{ version: string; path: string; source: string; downloadDate?: string }>
+  >
+  downloadPython: (version: string) => void
+  setProjectPythonVersion: (projectHash: string, version: string) => Promise<{ success: boolean }>
+  getProjectPythonVersion: (projectHash: string) => Promise<string | null>
+  getPythonPath: (version: string) => Promise<string | null>
+  deletePython: (version: string) => Promise<{ success: boolean; error?: string }>
+  isPythonInstalled: (version: string) => Promise<boolean>
+  repairPython: (version: string) => Promise<{ success: boolean; error?: string }>
+  // Listeners
   onLogs: (callback: (log: string) => void) => void
   onStatusChange: (callback: (status: string) => void) => void
   onInstallStatus: (callback: (status: string) => void) => void
   onCheckStatus: (callback: (isInstalled: boolean) => void) => void
+  onDownloadProgress: (callback: (data: { version: string; progress: number }) => void) => void
+  onDownloadStatus: (
+    callback: (data: {
+      version: string
+      status: string
+      path?: string
+      error?: string
+    }) => void
+  ) => void
   removeAllListeners: () => void
 }
 
@@ -49,10 +79,39 @@ const App: React.FC = () => {
   )
 
   const [logs, setLogs] = useState<string[]>([])
+  const [venvInfo, setVenvInfo] = useState<{ venvDir: string; exists: boolean } | null>(null)
 
   // Settings State
   const [settings, setSettings] = useState<Settings>(DEFAULT_SETTINGS)
   const [isSettingsOpen, setIsSettingsOpen] = useState(false)
+  const [showPythonManager, setShowPythonManager] = useState(false)
+  const [currentPythonVersion, setCurrentPythonVersion] = useState<string | null>(null)
+  const [hasScannedPython, setHasScannedPython] = useState(false)
+
+  // Auto-scan for Python versions on first load
+  useEffect(() => {
+    const initPython = async () => {
+      if (!hasScannedPython) {
+        try {
+          await window.api.scanSystemPythons()
+          setHasScannedPython(true)
+          
+          // Get current Python version if using system python command
+          if (settings.pythonCommand === 'python' || settings.pythonCommand.includes('python')) {
+            // This will be detected by the system scan
+            const versions = await window.api.getPythonVersions()
+            if (versions.managed.length === 0 && versions.system.length === 0) {
+              // No Python found, auto-show manager
+              setShowPythonManager(true)
+            }
+          }
+        } catch (error) {
+          console.error('Failed to scan Python versions:', error)
+        }
+      }
+    }
+    initPython()
+  }, [hasScannedPython, settings.pythonCommand])
 
   // Load settings on mount
   useEffect(() => {
@@ -115,6 +174,15 @@ const App: React.FC = () => {
     return () => window.api.removeAllListeners()
   }, [])
 
+  // Load venv info when project path changes
+  useEffect(() => {
+    if (projectPath) {
+      window.api.getVenvInfo(projectPath).then(setVenvInfo)
+    } else {
+      setVenvInfo(null)
+    }
+  }, [projectPath, installStatus]) // Also reload when install status changes
+
   const handleSelectFolder = async (): Promise<void> => {
     const path = await window.api.selectFolder()
     if (path) {
@@ -130,6 +198,22 @@ const App: React.FC = () => {
     window.api.installRequirements(projectPath, settings.pythonCommand)
   }
 
+  const handleCleanVenv = async (): Promise<void> => {
+    if (!projectPath) return
+    
+    if (confirm('Are you sure you want to remove the virtual environment? You will need to reinstall dependencies.')) {
+      const result = await window.api.cleanVenv(projectPath)
+      if (result.success) {
+        setInstallStatus('idle')
+        setLogs((prev) => [...prev, `[SYSTEM] ${result.message}\n`])
+        // Refresh venv info
+        window.api.getVenvInfo(projectPath).then(setVenvInfo)
+      } else {
+        setLogs((prev) => [...prev, `[SYSTEM] Failed to clean venv: ${result.message}\n`])
+      }
+    }
+  }
+
   const handleStart = (): void => {
     if (!projectPath) {
       alert('Please select a folder first')
@@ -141,6 +225,32 @@ const App: React.FC = () => {
 
   const handleStop = (): void => {
     window.api.stopOtree(projectPath)
+  }
+
+  // Helper function to compute project hash (simple browser-compatible version)
+  const getProjectHash = (path: string): string => {
+    // Simple hash function for browser compatibility
+    let hash = 0
+    for (let i = 0; i < path.length; i++) {
+      const char = path.charCodeAt(i)
+      hash = (hash << 5) - hash + char
+      hash = hash & hash // Convert to 32-bit integer
+    }
+    return Math.abs(hash).toString(16).substring(0, 8)
+  }
+
+  // Handle Python version selection
+  const handlePythonVersionSelect = (version: string, pythonPath: string): void => {
+    setSettings({ ...settings, pythonCommand: pythonPath })
+    setCurrentPythonVersion(version)
+    localStorage.setItem(
+      'otree-launcher-settings',
+      JSON.stringify({ ...settings, pythonCommand: pythonPath })
+    )
+    setLogs((prev) => [
+      ...prev,
+      `[SYSTEM] Selected Python ${version} at ${pythonPath}\n`
+    ])
   }
 
   return (
@@ -225,7 +335,7 @@ const App: React.FC = () => {
           <h2 className="text-sm font-semibold text-muted-foreground uppercase tracking-wider">
             2. Environment Setup
           </h2>
-          <div className="bg-card border border-border rounded-lg p-4">
+          <div className="bg-card border border-border rounded-lg p-4 space-y-3">
             <button
               onClick={handleInstall}
               disabled={!projectPath || installStatus === 'installing' || status === 'running'}
@@ -299,8 +409,87 @@ const App: React.FC = () => {
                 </>
               )}
             </button>
+
+            {/* Python Version Info */}
+            <div className="bg-secondary/50 border border-border rounded p-3 space-y-2">
+              <div className="flex items-center justify-between">
+                <span className="text-xs font-medium text-muted-foreground">Python Version</span>
+                <button
+                  onClick={() => setShowPythonManager(!showPythonManager)}
+                  className="text-xs text-blue-400 hover:text-blue-300 transition-colors"
+                >
+                  {showPythonManager ? 'Hide Manager' : 'Manage Versions'}
+                </button>
+              </div>
+              <div className="flex items-start gap-2">
+                <div className={`mt-1 w-2 h-2 rounded-full shrink-0 ${currentPythonVersion ? 'bg-green-500' : 'bg-yellow-500'}`}></div>
+                <div className="flex-1 min-w-0">
+                  <p className="text-xs font-mono text-foreground/80 break-all">
+                    {currentPythonVersion ? `Python ${currentPythonVersion}` : 'Using system default Python'}
+                  </p>
+                  <p className="text-xs text-muted-foreground mt-1">
+                    {currentPythonVersion 
+                      ? 'Selected from managed versions' 
+                      : 'Click "Manage Versions" to select a specific version'}
+                  </p>
+                </div>
+              </div>
+            </div>
+
+            {/* Virtual Environment Info */}
+            {venvInfo && (
+              <div className="bg-secondary/50 border border-border rounded p-3 space-y-2">
+                <div className="flex items-center justify-between">
+                  <span className="text-xs font-medium text-muted-foreground">Virtual Environment</span>
+                  {venvInfo.exists && (
+                    <button
+                      onClick={handleCleanVenv}
+                      disabled={status === 'running' || installStatus === 'installing'}
+                      className="text-xs text-red-400 hover:text-red-300 disabled:opacity-50 disabled:cursor-not-allowed"
+                      title="Remove virtual environment"
+                    >
+                      Clean
+                    </button>
+                  )}
+                </div>
+                <div className="flex items-start gap-2">
+                  <div className={`mt-1 w-2 h-2 rounded-full shrink-0 ${venvInfo.exists ? 'bg-green-500' : 'bg-gray-500'}`}></div>
+                  <div className="flex-1 min-w-0">
+                    <p className="text-xs font-mono text-foreground/80 break-all">
+                      {venvInfo.venvDir}
+                    </p>
+                    <p className="text-xs text-muted-foreground mt-1">
+                      {venvInfo.exists ? 'Exists' : 'Not created yet'}
+                    </p>
+                  </div>
+                </div>
+              </div>
+            )}
           </div>
         </div>
+
+        {/* Section 2b: Python Version Management (Conditional) */}
+        {showPythonManager && projectPath && (
+          <div className="space-y-3">
+            <div className="flex items-center justify-between">
+              <h2 className="text-sm font-semibold text-muted-foreground uppercase tracking-wider">
+                🐍 Python Version Management
+              </h2>
+              <button
+                onClick={() => setShowPythonManager(false)}
+                className="text-xs text-muted-foreground hover:text-foreground transition-colors"
+              >
+                ✕ Close
+              </button>
+            </div>
+            <div className="bg-card border border-border rounded-lg p-2 max-h-[500px] overflow-y-auto">
+              <PythonVersionManager
+                projectHash={getProjectHash(projectPath)}
+                onVersionSelect={handlePythonVersionSelect}
+              />
+            </div>
+          </div>
+        )}
 
         {/* Section 3: Server Control */}
         <div className="space-y-3">

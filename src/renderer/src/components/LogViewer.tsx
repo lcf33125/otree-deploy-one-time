@@ -41,8 +41,11 @@ const LogViewer: React.FC<LogViewerProps> = ({ logs, autoCopy = false }) => {
     })
 
     const fitAddon = new FitAddon()
-    // WebLinksAddon makes URLs clickable (opens in new tab by default)
-    const webLinksAddon = new WebLinksAddon()
+    // WebLinksAddon makes URLs clickable
+    const webLinksAddon = new WebLinksAddon((_event: MouseEvent, uri: string) => {
+      // Use Electron's shell.openExternal through IPC
+      window.api.openUrl(uri)
+    })
 
     term.loadAddon(fitAddon)
     term.loadAddon(webLinksAddon)

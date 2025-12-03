@@ -56,6 +56,11 @@ app.whenReady().then(() => {
   // IPC test
   ipcMain.on('ping', () => console.log('pong'))
 
+  // Handle opening URLs in default browser
+  ipcMain.on('open-url', (_event, url: string) => {
+    shell.openExternal(url)
+  })
+
   createWindow()
 
   app.on('activate', function () {

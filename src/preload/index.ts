@@ -38,6 +38,8 @@ const api = {
     ipcRenderer.on('otree:install-status', (_event, value) => callback(value)),
   onCheckStatus: (callback) =>
     ipcRenderer.on('otree:check-status', (_event, value) => callback(value)),
+  onServerUrl: (callback) =>
+    ipcRenderer.on('otree:server-url', (_event, value) => callback(value)),
   onDownloadProgress: (callback) =>
     ipcRenderer.on('python:download-progress', (_event, value) => callback(value)),
   onDownloadStatus: (callback) =>
@@ -47,6 +49,7 @@ const api = {
     ipcRenderer.removeAllListeners('otree:status')
     ipcRenderer.removeAllListeners('otree:install-status')
     ipcRenderer.removeAllListeners('otree:check-status')
+    ipcRenderer.removeAllListeners('otree:server-url')
     ipcRenderer.removeAllListeners('python:download-progress')
     ipcRenderer.removeAllListeners('python:download-status')
   }

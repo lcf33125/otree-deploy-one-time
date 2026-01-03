@@ -4,6 +4,9 @@ import { electronApp, optimizer, is } from '@electron-toolkit/utils'
 import icon from '../../resources/icon.png?asset'
 import { setupOtreeHandlers, killOtreeProcess } from './otree-controller' // Import our new file
 
+// Track if we're quitting to prevent duplicate cleanup
+let isQuitting = false
+
 function createWindow(): void {
   // Create the browser window.
   const mainWindow = new BrowserWindow({
@@ -36,7 +39,12 @@ function createWindow(): void {
   } else {
     mainWindow.loadFile(join(__dirname, '../renderer/index.html'))
   }
-  setupOtreeHandlers(mainWindow)
+
+  try {
+    setupOtreeHandlers(mainWindow)
+  } catch (error) {
+    console.error('Failed to setup oTree handlers:', error)
+  }
 }
 
 // This method will be called when Electron has finished
@@ -70,18 +78,27 @@ app.whenReady().then(() => {
   })
 })
 
-// Quit when all windows are closed, except on macOS. There, it's common
-// for applications and their menu bar to stay active until the user quits
-// explicitly with Cmd + Q.
-app.on('window-all-closed', () => {
-  killOtreeProcess()
-  if (process.platform !== 'darwin') {
+// Handle app quit - ensure we only clean up once
+app.on('before-quit', async (event) => {
+  if (!isQuitting) {
+    event.preventDefault()
+    isQuitting = true
+    await killOtreeProcess()
     app.quit()
   }
 })
 
-app.on('before-quit', () => {
-  killOtreeProcess()
+// Quit when all windows are closed, except on macOS. There, it's common
+// for applications and their menu bar to stay active until the user quits
+// explicitly with Cmd + Q.
+app.on('window-all-closed', async () => {
+  if (process.platform !== 'darwin') {
+    if (!isQuitting) {
+      isQuitting = true
+      await killOtreeProcess()
+      app.quit()
+    }
+  }
 })
 
 // In this file you can include the rest of your app's specific main process

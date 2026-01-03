@@ -37,6 +37,7 @@ interface IElectronAPI {
   onStatusChange: (callback: (status: string) => void) => void
   onInstallStatus: (callback: (status: string) => void) => void
   onCheckStatus: (callback: (isInstalled: boolean) => void) => void
+  onServerUrl: (callback: (url: string) => void) => void
   onDownloadProgress: (callback: (data: { version: string; progress: number }) => void) => void
   onDownloadStatus: (
     callback: (data: {
@@ -87,6 +88,7 @@ const App: React.FC = () => {
   const [showPythonManager, setShowPythonManager] = useState(false)
   const [currentPythonVersion, setCurrentPythonVersion] = useState<string | null>(null)
   const [hasScannedPython, setHasScannedPython] = useState(false)
+  const [serverUrl, setServerUrl] = useState<string | null>(null)
 
   // Auto-scan for Python versions on first load
   useEffect(() => {
@@ -156,6 +158,15 @@ const App: React.FC = () => {
     window.api.onStatusChange((newStatus: string) => {
       // Cast the string from backend to our union type
       setStatus(newStatus as 'stopped' | 'running')
+      // Clear server URL when stopped
+      if (newStatus === 'stopped') {
+        setServerUrl(null)
+      }
+    })
+
+    // Listen for Server URL
+    window.api.onServerUrl((url: string) => {
+      setServerUrl(url)
     })
 
     window.api.onInstallStatus((newStatus: string) => {
@@ -220,6 +231,7 @@ const App: React.FC = () => {
       return
     }
     setLogs([]) // Clear logs
+    setServerUrl(null) // Clear previous server URL
     window.api.startOtreePython(projectPath, settings.pythonCommand)
   }
 
@@ -496,56 +508,83 @@ const App: React.FC = () => {
           <h2 className="text-sm font-semibold text-muted-foreground uppercase tracking-wider">
             3. Server Control
           </h2>
-          <div className="bg-card border border-border rounded-lg p-4 flex gap-3">
-            <button
-              onClick={handleStart}
-              disabled={!projectPath || installStatus === 'installing' || status === 'running'}
-              className={`flex-1 h-10 px-4 py-2 rounded-md text-sm font-medium transition-colors flex items-center justify-center gap-2 ${
-                status === 'running'
-                  ? 'bg-secondary text-muted-foreground cursor-not-allowed opacity-50'
-                  : 'bg-green-600 hover:bg-green-500 text-white'
-              } disabled:opacity-50 disabled:cursor-not-allowed`}
-            >
-              <svg
-                xmlns="http://www.w3.org/2000/svg"
-                width="16"
-                height="16"
-                viewBox="0 0 24 24"
-                fill="currentColor"
-                stroke="currentColor"
-                strokeWidth="2"
-                strokeLinecap="round"
-                strokeLinejoin="round"
+          <div className="bg-card border border-border rounded-lg p-4 space-y-3">
+            <div className="flex gap-3">
+              <button
+                onClick={handleStart}
+                disabled={!projectPath || installStatus === 'installing' || status === 'running'}
+                className={`flex-1 h-10 px-4 py-2 rounded-md text-sm font-medium transition-colors flex items-center justify-center gap-2 ${
+                  status === 'running'
+                    ? 'bg-secondary text-muted-foreground cursor-not-allowed opacity-50'
+                    : 'bg-green-600 hover:bg-green-500 text-white'
+                } disabled:opacity-50 disabled:cursor-not-allowed`}
               >
-                <polygon points="5 3 19 12 5 21 5 3" />
-              </svg>
-              Start Server
-            </button>
+                <svg
+                  xmlns="http://www.w3.org/2000/svg"
+                  width="16"
+                  height="16"
+                  viewBox="0 0 24 24"
+                  fill="currentColor"
+                  stroke="currentColor"
+                  strokeWidth="2"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                >
+                  <polygon points="5 3 19 12 5 21 5 3" />
+                </svg>
+                Start Server
+              </button>
 
-            <button
-              onClick={handleStop}
-              disabled={status === 'stopped'}
-              className={`flex-1 h-10 px-4 py-2 rounded-md text-sm font-medium transition-colors flex items-center justify-center gap-2 ${
-                status === 'stopped'
-                  ? 'bg-secondary text-muted-foreground cursor-not-allowed opacity-50'
-                  : 'bg-destructive hover:bg-destructive/90 text-destructive-foreground'
-              }`}
-            >
-              <svg
-                xmlns="http://www.w3.org/2000/svg"
-                width="16"
-                height="16"
-                viewBox="0 0 24 24"
-                fill="currentColor"
-                stroke="currentColor"
-                strokeWidth="2"
-                strokeLinecap="round"
-                strokeLinejoin="round"
+              <button
+                onClick={handleStop}
+                disabled={status === 'stopped'}
+                className={`flex-1 h-10 px-4 py-2 rounded-md text-sm font-medium transition-colors flex items-center justify-center gap-2 ${
+                  status === 'stopped'
+                    ? 'bg-secondary text-muted-foreground cursor-not-allowed opacity-50'
+                    : 'bg-destructive hover:bg-destructive/90 text-destructive-foreground'
+                }`}
               >
-                <rect x="3" y="3" width="18" height="18" rx="2" ry="2" />
-              </svg>
-              Stop Server
-            </button>
+                <svg
+                  xmlns="http://www.w3.org/2000/svg"
+                  width="16"
+                  height="16"
+                  viewBox="0 0 24 24"
+                  fill="currentColor"
+                  stroke="currentColor"
+                  strokeWidth="2"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                >
+                  <rect x="3" y="3" width="18" height="18" rx="2" ry="2" />
+                </svg>
+                Stop Server
+              </button>
+            </div>
+
+            {/* Open in Browser Button - Shows when server URL is available */}
+            {serverUrl && (
+              <button
+                onClick={() => window.api.openUrl(serverUrl)}
+                className="w-full h-10 px-4 py-2 rounded-md text-sm font-medium transition-colors flex items-center justify-center gap-2 bg-blue-600 hover:bg-blue-500 text-white animate-pulse"
+              >
+                <svg
+                  xmlns="http://www.w3.org/2000/svg"
+                  width="16"
+                  height="16"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="2"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                >
+                  <circle cx="12" cy="12" r="10" />
+                  <path d="M2 12h20" />
+                  <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z" />
+                </svg>
+                Open in Browser ({serverUrl})
+              </button>
+            )}
           </div>
         </div>
       </div>

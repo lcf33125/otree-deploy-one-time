@@ -7,6 +7,9 @@ import net from 'net'
 import util from 'util'
 import crypto from 'crypto'
 import { getPythonManager } from './python-manager'
+import { IPC_CHANNELS, DEFAULT_OTREE_PORT, DOCKER_COMPOSE_FILENAME, LOG_DIR, STATUS_MESSAGES, SYSTEM_MESSAGES, ERROR_CODES } from './constants'
+import type { DockerComposeConfig, VenvPaths } from './types'
+import { validateProjectPath, validateFilePath, generateSecurePassword, isManagedPython } from './utils'
 
 const execAsync = util.promisify(exec)
 
@@ -25,7 +28,8 @@ let otreeProcess: ChildProcess | null = null
 let isDockerMode = false
 let currentLogPath: string | null = null
 let currentProjectPath: string | null = null
-let currentPort = 8000
+let currentPort = DEFAULT_OTREE_PORT
+let isCleaningUp = false
 
 // Helper: Get a free port (try desiredPort first, then random)
 const getPort = (desiredPort: number): Promise<number> => {
@@ -33,7 +37,7 @@ const getPort = (desiredPort: number): Promise<number> => {
     const server = net.createServer()
     server.unref()
     server.on('error', (err: any) => {
-      if (err.code === 'EADDRINUSE') {
+      if (err.code === ERROR_CODES.PORT_IN_USE) {
         // Port is busy, try random
         const server2 = net.createServer()
         server2.unref()
@@ -50,8 +54,8 @@ const getPort = (desiredPort: number): Promise<number> => {
     // If we don't specify host, it might bind to IPv6 (::) and miss the IPv4 conflict.
     server.listen(desiredPort, '127.0.0.1', () => {
       server.close(() => {
-        // Small delay to ensure OS releases the handle
-        setTimeout(() => resolve(desiredPort), 50)
+        // Increased delay to ensure OS releases the handle
+        setTimeout(() => resolve(desiredPort), 200)
       })
     })
   })
@@ -61,7 +65,7 @@ const getPort = (desiredPort: number): Promise<number> => {
 const initLogFile = (projectPath: string, prefix: string): void => {
   try {
     const timestamp = new Date().toISOString().replace(/[:.]/g, '-')
-    const logsDir = path.join(projectPath, 'launcher-logs')
+    const logsDir = path.join(projectPath, LOG_DIR)
     fs.ensureDirSync(logsDir)
     currentLogPath = path.join(logsDir, `${prefix}-${timestamp}.log`)
   } catch (e) {
@@ -72,85 +76,129 @@ const initLogFile = (projectPath: string, prefix: string): void => {
 // Helper: Write to log file and send to UI
 const logToUIAndFile = (window: BrowserWindow, msg: string): void => {
   if (!window.isDestroyed()) {
-    window.webContents.send('otree:logs', msg)
+    window.webContents.send(IPC_CHANNELS.OTREE_LOGS, msg)
   }
   if (currentLogPath) {
     fs.appendFile(currentLogPath, msg).catch((err) => console.error('Log write error:', err))
   }
 }
 
-// Exported function to kill the process (used by main/index.ts on app exit)
-export const killOtreeProcess = (mainWindow?: BrowserWindow): void => {
-  if (mainWindow) {
-    sendStatus(mainWindow, 'Stopping server...')
+// Helper: Kill process by PID on Windows
+const killProcessByPid = async (pid: number): Promise<void> => {
+  try {
+    await execAsync(`taskkill /pid ${pid} /T /F`)
+  } catch (error) {
+    console.error(`Failed to kill process ${pid}:`, error)
   }
+}
 
-  if (otreeProcess) {
-    if (isDockerMode && currentProjectPath) {
-      try {
-        const args = ['compose', '-f', 'docker-compose-launcher.yml', 'down']
-        spawn('docker', args, { cwd: currentProjectPath, shell: true })
-      } catch (e) {
-        console.error('Failed to stop docker containers', e)
-      }
-    }
-
-    // On Windows with shell: true, .kill() only kills the shell, not the child.
-    // We use taskkill to kill the process tree.
-    if (process.platform === 'win32') {
-      try {
-        // 1. Try to kill by PID if we have it
-        if (otreeProcess.pid) {
-          exec(`taskkill /pid ${otreeProcess.pid} /T /F`)
+// Helper: Kill process by port on Windows
+const killProcessByPort = async (port: number): Promise<void> => {
+  try {
+    const { stdout } = await execAsync(`netstat -ano | findstr :${port}`)
+    if (stdout) {
+      const lines = stdout.trim().split('\n')
+      const killPromises = lines.map(async (line) => {
+        const parts = line.trim().split(/\s+/)
+        const pid = parts[parts.length - 1]
+        if (pid && /^\d+$/.test(pid)) {
+          await killProcessByPid(parseInt(pid, 10))
         }
-        // 2. Also try to kill whatever is listening on the current port
-        exec(`netstat -ano | findstr :${currentPort}`, (error, stdout) => {
-          if (!error && stdout) {
-            const lines = stdout.trim().split('\n')
-            lines.forEach((line) => {
-              const parts = line.trim().split(/\s+/)
-              const pid = parts[parts.length - 1]
-              if (pid && /^\d+$/.test(pid)) {
-                exec(`taskkill /pid ${pid} /F`)
-              }
-            })
-          }
-        })
-      } catch (e) {
-        console.error('Failed to taskkill process', e)
-      }
-    } else {
-      otreeProcess.kill()
+      })
+      await Promise.all(killPromises)
+    }
+  } catch (error) {
+    // Port might not be in use, which is fine
+    console.debug(`No process found on port ${port}`)
+  }
+}
+
+// Exported function to kill the process (used by main/index.ts on app exit)
+export const killOtreeProcess = async (mainWindow?: BrowserWindow): Promise<void> => {
+  // Prevent concurrent cleanup
+  if (isCleaningUp) {
+    return
+  }
+  isCleaningUp = true
+
+  try {
+    if (mainWindow) {
+      sendStatus(mainWindow, STATUS_MESSAGES.STOPPING)
     }
 
-    otreeProcess = null
-  }
+    if (otreeProcess) {
+      if (isDockerMode && currentProjectPath) {
+        try {
+          const validatedPath = validateProjectPath(currentProjectPath)
+          const args = ['compose', '-f', DOCKER_COMPOSE_FILENAME, 'down']
+          // Removed shell: true for security
+          const dockerProcess = spawn('docker', args, { cwd: validatedPath })
 
-  if (mainWindow) {
-    sendStatus(mainWindow, 'Server stopped.')
+          // Wait for docker compose to finish
+          await new Promise<void>((resolve) => {
+            dockerProcess.on('close', () => resolve())
+            // Timeout after 10 seconds
+            setTimeout(() => resolve(), 10000)
+          })
+        } catch (e) {
+          console.error('Failed to stop docker containers', e)
+        }
+      }
+
+      // On Windows with shell: true, .kill() only kills the shell, not the child.
+      // We use taskkill to kill the process tree.
+      if (process.platform === 'win32') {
+        try {
+          // Kill by PID if we have it
+          if (otreeProcess.pid) {
+            await killProcessByPid(otreeProcess.pid)
+          }
+          // Also try to kill whatever is listening on the current port
+          await killProcessByPort(currentPort)
+        } catch (e) {
+          console.error('Failed to taskkill process', e)
+        }
+      } else {
+        // Unix: kill process group
+        try {
+          if (otreeProcess.pid) {
+            process.kill(-otreeProcess.pid, 'SIGTERM')
+          }
+        } catch (e) {
+          // Fallback to regular kill
+          otreeProcess.kill('SIGTERM')
+        }
+      }
+
+      otreeProcess = null
+    }
+
+    if (mainWindow) {
+      sendStatus(mainWindow, STATUS_MESSAGES.STOPPED)
+    }
+  } finally {
+    isCleaningUp = false
   }
 }
 
 // Helper: Get venv paths
 // Virtual environments are stored in app's data directory to avoid polluting user projects
 // Each project gets its own venv identified by a hash of its absolute path
-const getVenvPaths = (
-  projectPath: string
-): { python: string; pip: string; otree: string; venvDir: string } => {
+const getVenvPaths = (projectPath: string): VenvPaths => {
   const isWin = process.platform === 'win32'
-  
+
   // Create a hash of the project path for unique venv identification
   const projectHash = crypto
     .createHash('md5')
     .update(projectPath)
     .digest('hex')
     .substring(0, 8)
-  
+
   // Store all venvs in app's userData directory
   // This keeps user projects clean and centralizes venv management
   const venvBaseDir = path.join(app.getPath('userData'), 'venvs')
   const venvDir = path.join(venvBaseDir, projectHash)
-  
+
   const binDir = isWin ? path.join(venvDir, 'Scripts') : path.join(venvDir, 'bin')
 
   return {
@@ -163,7 +211,7 @@ const getVenvPaths = (
 
 export const setupOtreeHandlers = (mainWindow: BrowserWindow): void => {
   // 1. Handler: Select Project Folder
-  ipcMain.handle('dialog:openFolder', async () => {
+  ipcMain.handle(IPC_CHANNELS.OPEN_FOLDER, async () => {
     const result = await dialog.showOpenDialog(mainWindow, {
       properties: ['openDirectory']
     })
@@ -171,40 +219,46 @@ export const setupOtreeHandlers = (mainWindow: BrowserWindow): void => {
   })
 
   // 2. Handler: Start oTree (Docker)
-  ipcMain.on('otree:start', async (_event: IpcMainEvent, projectPath: string) => {
+  ipcMain.on(IPC_CHANNELS.OTREE_START, async (_event: IpcMainEvent, projectPath: string) => {
     try {
-      currentProjectPath = projectPath
-      sendStatus(mainWindow, 'Initializing Docker environment...')
+      // Validate project path
+      const validatedPath = validateProjectPath(projectPath)
+      currentProjectPath = validatedPath
+      sendStatus(mainWindow, STATUS_MESSAGES.INITIALIZING_DOCKER)
 
       // A. Generate docker-compose.yml in the user's project folder
-      const composePath = path.join(projectPath, 'docker-compose-launcher.yml')
+      const composePath = validateFilePath(
+        path.join(validatedPath, DOCKER_COMPOSE_FILENAME),
+        validatedPath
+      )
 
-      // Generate the config object
+      // Generate the config object with secure password
       const composeConfig = generateComposeConfig()
 
       // Write the file
       await fs.writeFile(composePath, yaml.stringify(composeConfig))
 
-      sendStatus(mainWindow, 'Config generated. Starting containers...')
+      sendStatus(mainWindow, STATUS_MESSAGES.CONFIG_GENERATED)
 
       // B. Spawn the Docker Compose command
-      // We use -f to point to our specific generated file
       const cmd = 'docker'
-      const args = ['compose', '-f', 'docker-compose-launcher.yml', 'up', '--build']
+      const args = ['compose', '-f', DOCKER_COMPOSE_FILENAME, 'up', '--build']
 
-      // Spawn the process
+      // Spawn the process - removed shell: true for security
       isDockerMode = true
-      otreeProcess = spawn(cmd, args, { cwd: projectPath, shell: true })
+      otreeProcess = spawn(cmd, args, { cwd: validatedPath })
 
       // C. Stream Logs to UI
       if (otreeProcess.stdout) {
         otreeProcess.stdout.on('data', (data: Buffer) => {
           const log = data.toString()
-          mainWindow.webContents.send('otree:logs', log)
+          mainWindow.webContents.send(IPC_CHANNELS.OTREE_LOGS, log)
 
           // Detect when server is ready
           if (log.includes('http://0.0.0.0:8000')) {
-            mainWindow.webContents.send('otree:status', 'running')
+            mainWindow.webContents.send(IPC_CHANNELS.OTREE_STATUS, 'running')
+            // Send server URL to renderer for browser open button
+            mainWindow.webContents.send(IPC_CHANNELS.OTREE_SERVER_URL, 'http://localhost:8000')
           }
         })
       }
@@ -212,13 +266,13 @@ export const setupOtreeHandlers = (mainWindow: BrowserWindow): void => {
       if (otreeProcess.stderr) {
         otreeProcess.stderr.on('data', (data: Buffer) => {
           // Docker often sends normal info to stderr, so we treat it as log
-          mainWindow.webContents.send('otree:logs', data.toString())
+          mainWindow.webContents.send(IPC_CHANNELS.OTREE_LOGS, data.toString())
         })
       }
 
       otreeProcess.on('close', (code: number | null) => {
-        sendStatus(mainWindow, `Process exited with code ${code}`)
-        mainWindow.webContents.send('otree:status', 'stopped')
+        sendStatus(mainWindow, `${STATUS_MESSAGES.PROCESS_EXITED} ${code}`)
+        mainWindow.webContents.send(IPC_CHANNELS.OTREE_STATUS, 'stopped')
         otreeProcess = null
       })
     } catch (error) {
@@ -232,39 +286,39 @@ export const setupOtreeHandlers = (mainWindow: BrowserWindow): void => {
 
   // 2b. Handler: Install Requirements (Python + venv)
   ipcMain.on(
-    'otree:install-requirements',
+    IPC_CHANNELS.OTREE_INSTALL_REQUIREMENTS,
     async (_event: IpcMainEvent, projectPath: string, pythonCmd: string = 'python') => {
       try {
-        initLogFile(projectPath, 'install')
-        const paths = getVenvPaths(projectPath)
+        const validatedPath = validateProjectPath(projectPath)
+        initLogFile(validatedPath, 'install')
+        const paths = getVenvPaths(validatedPath)
 
         // 1. Create venv if it doesn't exist
         if (!fs.existsSync(paths.venvDir)) {
-          sendStatus(mainWindow, `Creating virtual environment using ${pythonCmd}...`)
+          sendStatus(mainWindow, `${STATUS_MESSAGES.CREATING_VENV} using ${pythonCmd}...`)
           sendStatus(mainWindow, `Location: ${paths.venvDir}`)
-          
+
           // Ensure parent directory exists
           await fs.ensureDir(path.dirname(paths.venvDir))
-          
+
           // Check if this is a managed Python (embeddable) - use virtualenv instead of venv
-          const isManagedPython = pythonCmd.includes('otree-deploy-one-click\\pythons') || 
-                                   pythonCmd.includes('otree-deploy-one-click/pythons')
-          
-          if (isManagedPython) {
+          const isManagedPy = isManagedPython(pythonCmd)
+
+          if (isManagedPy) {
             // Use virtualenv for embeddable Python
             const pythonDir = path.dirname(pythonCmd)
             const virtualenvExe = path.join(pythonDir, 'Scripts', 'virtualenv.exe')
             const pipExe = path.join(pythonDir, 'Scripts', 'pip.exe')
-            
+
             // Check if virtualenv is installed, install if not
             if (!fs.existsSync(virtualenvExe)) {
               sendStatus(mainWindow, 'Installing virtualenv (first-time setup)...')
               await new Promise<void>((resolve, reject) => {
+                // Removed shell: true for security
                 const installProcess = spawn(pipExe, ['install', 'virtualenv'], {
-                  shell: true,
                   cwd: pythonDir
                 })
-                
+
                 let output = ''
                 installProcess.stdout?.on('data', (data) => {
                   output += data.toString()
@@ -274,7 +328,7 @@ export const setupOtreeHandlers = (mainWindow: BrowserWindow): void => {
                   output += data.toString()
                   logToUIAndFile(mainWindow, data.toString())
                 })
-                
+
                 installProcess.on('close', (code) => {
                   if (code === 0) {
                     sendStatus(mainWindow, 'virtualenv installed successfully.')
@@ -285,14 +339,14 @@ export const setupOtreeHandlers = (mainWindow: BrowserWindow): void => {
                 })
               })
             }
-            
+
             sendStatus(mainWindow, 'Creating virtual environment with virtualenv...')
             await new Promise<void>((resolve, reject) => {
+              // Removed shell: true for security
               const venvProcess = spawn(virtualenvExe, [paths.venvDir], {
-                shell: true,
                 cwd: pythonDir
               })
-              
+
               let output = ''
               venvProcess.stdout?.on('data', (data) => {
                 output += data.toString()
@@ -302,7 +356,7 @@ export const setupOtreeHandlers = (mainWindow: BrowserWindow): void => {
                 output += data.toString()
                 logToUIAndFile(mainWindow, data.toString())
               })
-              
+
               venvProcess.on('close', (code) => {
                 if (code === 0) resolve()
                 else reject(new Error(`Failed to create venv with virtualenv, code ${code}`))
@@ -311,10 +365,9 @@ export const setupOtreeHandlers = (mainWindow: BrowserWindow): void => {
           } else {
             // Use standard venv for system Python
             await new Promise<void>((resolve, reject) => {
-              const venvProcess = spawn(pythonCmd, ['-m', 'venv', paths.venvDir], {
-                shell: true
-              })
-              
+              // Removed shell: true for security
+              const venvProcess = spawn(pythonCmd, ['-m', 'venv', paths.venvDir])
+
               let output = ''
               venvProcess.stdout?.on('data', (data) => {
                 output += data.toString()
@@ -324,39 +377,37 @@ export const setupOtreeHandlers = (mainWindow: BrowserWindow): void => {
                 output += data.toString()
                 logToUIAndFile(mainWindow, data.toString())
               })
-              
+
               venvProcess.on('close', (code) => {
                 if (code === 0) resolve()
                 else reject(new Error(`Failed to create venv, code ${code}`))
               })
             })
           }
-          
-          sendStatus(mainWindow, 'Virtual environment created successfully.')
+
+          sendStatus(mainWindow, STATUS_MESSAGES.VENV_CREATED)
         } else {
-          sendStatus(mainWindow, `Using existing virtual environment at: ${paths.venvDir}`)
+          sendStatus(mainWindow, `${STATUS_MESSAGES.USING_EXISTING_VENV} ${paths.venvDir}`)
         }
 
         // 2. Check if requirements.txt exists
-        const requirementsPath = path.join(projectPath, 'requirements.txt')
+        const requirementsPath = path.join(validatedPath, 'requirements.txt')
         const hasRequirements = fs.existsSync(requirementsPath)
 
         const cmd = paths.pip
         let args: string[]
 
         if (hasRequirements) {
-          sendStatus(mainWindow, 'Installing requirements from requirements.txt...')
+          sendStatus(mainWindow, STATUS_MESSAGES.INSTALLING_REQUIREMENTS)
           args = ['install', '-r', 'requirements.txt']
         } else {
-          sendStatus(
-            mainWindow,
-            'No requirements.txt found. Installing otree and common dependencies...'
-          )
+          sendStatus(mainWindow, STATUS_MESSAGES.INSTALLING_OTREE)
           // Install otree and commonly needed packages
           args = ['install', 'otree']
         }
 
-        const installProcess = spawn(cmd, args, { cwd: projectPath, shell: true })
+        // Removed shell: true for security
+        const installProcess = spawn(cmd, args, { cwd: validatedPath })
 
         if (installProcess.stdout) {
           installProcess.stdout.on('data', (data: Buffer) => {
@@ -373,14 +424,14 @@ export const setupOtreeHandlers = (mainWindow: BrowserWindow): void => {
         installProcess.on('close', (code: number | null) => {
           if (code === 0) {
             if (hasRequirements) {
-              sendStatus(mainWindow, 'Requirements installed successfully in venv.')
+              sendStatus(mainWindow, STATUS_MESSAGES.REQUIREMENTS_INSTALLED)
             } else {
-              sendStatus(mainWindow, 'otree installed successfully in venv.')
+              sendStatus(mainWindow, STATUS_MESSAGES.OTREE_INSTALLED)
             }
-            mainWindow.webContents.send('otree:install-status', 'success')
+            mainWindow.webContents.send(IPC_CHANNELS.OTREE_INSTALL_STATUS, 'success')
           } else {
-            sendStatus(mainWindow, `Installation failed with code ${code}`)
-            mainWindow.webContents.send('otree:install-status', 'error')
+            sendStatus(mainWindow, `${STATUS_MESSAGES.INSTALLATION_FAILED} ${code}`)
+            mainWindow.webContents.send(IPC_CHANNELS.OTREE_INSTALL_STATUS, 'error')
           }
         })
       } catch (error) {
@@ -389,58 +440,58 @@ export const setupOtreeHandlers = (mainWindow: BrowserWindow): void => {
         } else {
           sendStatus(mainWindow, `An unknown error occurred`)
         }
-        mainWindow.webContents.send('otree:install-status', 'error')
+        mainWindow.webContents.send(IPC_CHANNELS.OTREE_INSTALL_STATUS, 'error')
       }
     }
   )
 
   // 2b-check. Handler: Check Requirements
-  ipcMain.on('otree:check-requirements', async (_event: IpcMainEvent, projectPath: string) => {
+  ipcMain.on(IPC_CHANNELS.OTREE_CHECK_REQUIREMENTS, async (_event: IpcMainEvent, projectPath: string) => {
     try {
-      const paths = getVenvPaths(projectPath)
+      const validatedPath = validateProjectPath(projectPath)
+      const paths = getVenvPaths(validatedPath)
 
       // Check if venv python exists and can import otree
       if (!fs.existsSync(paths.python)) {
-        mainWindow.webContents.send('otree:check-status', false)
+        mainWindow.webContents.send(IPC_CHANNELS.OTREE_CHECK_STATUS, false)
         return
       }
 
       const cmd = paths.python
       const args = ['-c', 'import otree']
 
-      const checkProcess = spawn(cmd, args, { cwd: projectPath, shell: true })
+      // Removed shell: true for security
+      const checkProcess = spawn(cmd, args, { cwd: validatedPath })
 
       checkProcess.on('close', (code: number | null) => {
         const isInstalled = code === 0
-        mainWindow.webContents.send('otree:check-status', isInstalled)
+        mainWindow.webContents.send(IPC_CHANNELS.OTREE_CHECK_STATUS, isInstalled)
       })
     } catch {
-      mainWindow.webContents.send('otree:check-status', false)
+      mainWindow.webContents.send(IPC_CHANNELS.OTREE_CHECK_STATUS, false)
     }
   })
 
   // 2c. Handler: Start oTree (Python)
-  ipcMain.on('otree:start-python', async (_event: IpcMainEvent, projectPath: string) => {
+  ipcMain.on(IPC_CHANNELS.OTREE_START_PYTHON, async (_event: IpcMainEvent, projectPath: string) => {
     try {
-      currentProjectPath = projectPath
-      initLogFile(projectPath, 'server')
-      const paths = getVenvPaths(projectPath)
+      const validatedPath = validateProjectPath(projectPath)
+      currentProjectPath = validatedPath
+      initLogFile(validatedPath, 'server')
+      const paths = getVenvPaths(validatedPath)
 
       // Check if otree is installed
       if (!fs.existsSync(paths.otree)) {
-        sendStatus(
-          mainWindow,
-          'ERROR: otree not found in virtual environment. Please install dependencies first.'
-        )
-        mainWindow.webContents.send('otree:status', 'stopped')
+        sendStatus(mainWindow, STATUS_MESSAGES.OTREE_NOT_FOUND)
+        mainWindow.webContents.send(IPC_CHANNELS.OTREE_STATUS, 'stopped')
         return
       }
 
-      sendStatus(mainWindow, 'Starting oTree server from venv...')
+      sendStatus(mainWindow, STATUS_MESSAGES.STARTING_VENV)
 
       // Find a free port (prefer 8000)
-      currentPort = await getPort(8000)
-      sendStatus(mainWindow, `Using port ${currentPort}`)
+      currentPort = await getPort(DEFAULT_OTREE_PORT)
+      sendStatus(mainWindow, `${STATUS_MESSAGES.USING_PORT} ${currentPort}`)
 
       const cmd = paths.otree
       const args = ['devserver', currentPort.toString()]
@@ -458,7 +509,8 @@ export const setupOtreeHandlers = (mainWindow: BrowserWindow): void => {
       env['PYTHONUNBUFFERED'] = '1'
 
       isDockerMode = false
-      otreeProcess = spawn(cmd, args, { cwd: projectPath, shell: true, env })
+      // Removed shell: true for security
+      otreeProcess = spawn(cmd, args, { cwd: validatedPath, env })
 
       let portBusy = false
 
@@ -468,9 +520,11 @@ export const setupOtreeHandlers = (mainWindow: BrowserWindow): void => {
           log.includes(`http://localhost:${currentPort}`) ||
           log.includes(`http://127.0.0.1:${currentPort}`)
         ) {
-          mainWindow.webContents.send('otree:status', 'running')
+          mainWindow.webContents.send(IPC_CHANNELS.OTREE_STATUS, 'running')
+          // Send server URL to renderer for browser open button
+          mainWindow.webContents.send(IPC_CHANNELS.OTREE_SERVER_URL, `http://localhost:${currentPort}`)
         }
-        if (log.includes('Errno 10048') || log.includes('address already in use')) {
+        if (log.includes(ERROR_CODES.ERRNO_10048) || log.includes('address already in use')) {
           portBusy = true
         }
       }
@@ -479,12 +533,12 @@ export const setupOtreeHandlers = (mainWindow: BrowserWindow): void => {
         otreeProcess.stdout.on('data', (data: Buffer) => {
           const log = data.toString()
           logToUIAndFile(mainWindow, log)
-          
+
           // Inject system message when detecting Control+C instruction
           if (log.includes('To quit the server, press Control+C') || log.includes('press Control+C')) {
-            logToUIAndFile(mainWindow, '[SYSTEM] ⚠️  In this GUI app, use the "Stop Server" button instead of Control+C.\n')
+            logToUIAndFile(mainWindow, SYSTEM_MESSAGES.CONTROL_C_WARNING)
           }
-          
+
           checkRunning(log)
         })
       }
@@ -493,12 +547,12 @@ export const setupOtreeHandlers = (mainWindow: BrowserWindow): void => {
         otreeProcess.stderr.on('data', (data: Buffer) => {
           const log = data.toString()
           logToUIAndFile(mainWindow, log)
-          
+
           // Inject system message when detecting Control+C instruction
           if (log.includes('To quit the server, press Control+C') || log.includes('press Control+C')) {
-            logToUIAndFile(mainWindow, '[SYSTEM] ⚠️  In this GUI app, use the "Stop Server" button instead of Control+C.\n')
+            logToUIAndFile(mainWindow, SYSTEM_MESSAGES.CONTROL_C_WARNING)
           }
-          
+
           checkRunning(log)
         })
       }
@@ -507,13 +561,13 @@ export const setupOtreeHandlers = (mainWindow: BrowserWindow): void => {
         if (portBusy) {
           sendStatus(
             mainWindow,
-            `Port ${currentPort} is already in use. This process stopped, but the server is running (likely from a previous instance).`
+            `Port ${currentPort} ${STATUS_MESSAGES.PORT_BUSY}`
           )
           // We can optionally set status to running here if we are confident
-          mainWindow.webContents.send('otree:status', 'running')
+          mainWindow.webContents.send(IPC_CHANNELS.OTREE_STATUS, 'running')
         } else {
-          sendStatus(mainWindow, `Server process exited with code ${code}`)
-          mainWindow.webContents.send('otree:status', 'stopped')
+          sendStatus(mainWindow, `${STATUS_MESSAGES.SERVER_EXITED} ${code}`)
+          mainWindow.webContents.send(IPC_CHANNELS.OTREE_STATUS, 'stopped')
         }
         otreeProcess = null
       })
@@ -527,14 +581,14 @@ export const setupOtreeHandlers = (mainWindow: BrowserWindow): void => {
   })
 
   // 3. Handler: Stop oTree
-  ipcMain.on('otree:stop', () => {
-    killOtreeProcess(mainWindow)
+  ipcMain.on(IPC_CHANNELS.OTREE_STOP, async () => {
+    await killOtreeProcess(mainWindow)
     // Always send stopped status to ensure UI resets, even if process was already dead (e.g. zombie)
-    mainWindow.webContents.send('otree:status', 'stopped')
+    mainWindow.webContents.send(IPC_CHANNELS.OTREE_STATUS, 'stopped')
   })
 
   // 4. Handler: Scan Python Versions
-  ipcMain.handle('otree:scan-python-versions', async () => {
+  ipcMain.handle(IPC_CHANNELS.OTREE_SCAN_PYTHON_VERSIONS, async () => {
     const versions: { version: string; path: string }[] = []
 
     // Always add generic 'python'
@@ -592,15 +646,15 @@ export const setupOtreeHandlers = (mainWindow: BrowserWindow): void => {
   })
 
   // 5. Handler: Get Documents Path (for default suggestion)
-  ipcMain.handle('otree:get-documents-path', () => {
+  ipcMain.handle(IPC_CHANNELS.OTREE_GET_DOCUMENTS_PATH, () => {
     return path.join(app.getPath('documents'), 'oTreeProjects')
   })
 
   // 6. Handler: Get Virtual Environment Info
-  ipcMain.handle('otree:get-venv-info', (_event, projectPath: string) => {
+  ipcMain.handle(IPC_CHANNELS.OTREE_GET_VENV_INFO, (_event, projectPath: string) => {
     const paths = getVenvPaths(projectPath)
     const exists = fs.existsSync(paths.venvDir)
-    
+
     return {
       venvDir: paths.venvDir,
       exists,
@@ -609,10 +663,10 @@ export const setupOtreeHandlers = (mainWindow: BrowserWindow): void => {
   })
 
   // 7. Handler: Clean Virtual Environment
-  ipcMain.handle('otree:clean-venv', async (_event, projectPath: string) => {
+  ipcMain.handle(IPC_CHANNELS.OTREE_CLEAN_VENV, async (_event, projectPath: string) => {
     try {
       const paths = getVenvPaths(projectPath)
-      
+
       if (fs.existsSync(paths.venvDir)) {
         await fs.remove(paths.venvDir)
         return { success: true, message: 'Virtual environment removed successfully.' }
@@ -620,9 +674,9 @@ export const setupOtreeHandlers = (mainWindow: BrowserWindow): void => {
         return { success: true, message: 'No virtual environment found for this project.' }
       }
     } catch (error) {
-      return { 
-        success: false, 
-        message: error instanceof Error ? error.message : 'Unknown error occurred' 
+      return {
+        success: false,
+        message: error instanceof Error ? error.message : 'Unknown error occurred'
       }
     }
   })
@@ -631,17 +685,17 @@ export const setupOtreeHandlers = (mainWindow: BrowserWindow): void => {
   const pythonManager = getPythonManager()
 
   // 8. Handler: Get available Python versions
-  ipcMain.handle('python:get-versions', async () => {
+  ipcMain.handle(IPC_CHANNELS.PYTHON_GET_VERSIONS, async () => {
     return pythonManager.getAllPythons()
   })
 
   // 9. Handler: Get downloadable Python versions
-  ipcMain.handle('python:get-available-versions', async () => {
+  ipcMain.handle(IPC_CHANNELS.PYTHON_GET_AVAILABLE_VERSIONS, async () => {
     return pythonManager.getAvailableVersions()
   })
 
   // 10. Handler: Scan system for Python installations
-  ipcMain.handle('python:scan-system', async () => {
+  ipcMain.handle(IPC_CHANNELS.PYTHON_SCAN_SYSTEM, async () => {
     try {
       return await pythonManager.scanSystemPythons()
     } catch (error) {
@@ -651,25 +705,25 @@ export const setupOtreeHandlers = (mainWindow: BrowserWindow): void => {
   })
 
   // 11. Handler: Download a Python version
-  ipcMain.on('python:download', async (_event: IpcMainEvent, version: string) => {
+  ipcMain.on(IPC_CHANNELS.PYTHON_DOWNLOAD, async (_event: IpcMainEvent, version: string) => {
     try {
-      mainWindow.webContents.send('python:download-status', {
+      mainWindow.webContents.send(IPC_CHANNELS.PYTHON_DOWNLOAD_STATUS, {
         version,
         status: 'downloading',
         progress: 0
       })
 
       const pythonPath = await pythonManager.downloadPython(version, (progress) => {
-        mainWindow.webContents.send('python:download-progress', { version, progress })
+        mainWindow.webContents.send(IPC_CHANNELS.PYTHON_DOWNLOAD_PROGRESS, { version, progress })
       })
 
-      mainWindow.webContents.send('python:download-status', {
+      mainWindow.webContents.send(IPC_CHANNELS.PYTHON_DOWNLOAD_STATUS, {
         version,
         status: 'complete',
         path: pythonPath
       })
     } catch (error) {
-      mainWindow.webContents.send('python:download-status', {
+      mainWindow.webContents.send(IPC_CHANNELS.PYTHON_DOWNLOAD_STATUS, {
         version,
         status: 'error',
         error: error instanceof Error ? error.message : 'Unknown error'
@@ -679,7 +733,7 @@ export const setupOtreeHandlers = (mainWindow: BrowserWindow): void => {
 
   // 12. Handler: Set project's Python version preference
   ipcMain.handle(
-    'python:set-project-version',
+    IPC_CHANNELS.PYTHON_SET_PROJECT_VERSION,
     async (_event, projectHash: string, version: string) => {
       try {
         pythonManager.setProjectPython(projectHash, version)
@@ -694,17 +748,17 @@ export const setupOtreeHandlers = (mainWindow: BrowserWindow): void => {
   )
 
   // 13. Handler: Get project's Python version preference
-  ipcMain.handle('python:get-project-version', async (_event, projectHash: string) => {
+  ipcMain.handle(IPC_CHANNELS.PYTHON_GET_PROJECT_VERSION, async (_event, projectHash: string) => {
     return pythonManager.getProjectPython(projectHash)
   })
 
   // 14. Handler: Get Python path for a version
-  ipcMain.handle('python:get-path', async (_event, version: string) => {
+  ipcMain.handle(IPC_CHANNELS.PYTHON_GET_PATH, async (_event, version: string) => {
     return pythonManager.getPythonPath(version)
   })
 
   // 15. Handler: Delete a managed Python version
-  ipcMain.handle('python:delete', async (_event, version: string) => {
+  ipcMain.handle(IPC_CHANNELS.PYTHON_DELETE, async (_event, version: string) => {
     try {
       await pythonManager.deletePython(version)
       return { success: true }
@@ -717,12 +771,12 @@ export const setupOtreeHandlers = (mainWindow: BrowserWindow): void => {
   })
 
   // 16. Handler: Check if a version is installed
-  ipcMain.handle('python:is-installed', async (_event, version: string) => {
+  ipcMain.handle(IPC_CHANNELS.PYTHON_IS_INSTALLED, async (_event, version: string) => {
     return pythonManager.isVersionInstalled(version)
   })
 
   // 17. Handler: Repair a managed Python (reinstall virtualenv)
-  ipcMain.handle('python:repair', async (_event, version: string) => {
+  ipcMain.handle(IPC_CHANNELS.PYTHON_REPAIR, async (_event, version: string) => {
     try {
       const pythonPath = pythonManager.getPythonPath(version)
       if (!pythonPath) {
@@ -730,8 +784,7 @@ export const setupOtreeHandlers = (mainWindow: BrowserWindow): void => {
       }
 
       // Check if it's a managed Python
-      if (!pythonPath.includes('otree-deploy-one-click\\pythons') && 
-          !pythonPath.includes('otree-deploy-one-click/pythons')) {
+      if (!isManagedPython(pythonPath)) {
         return { success: false, error: 'Can only repair managed Python versions' }
       }
 
@@ -740,8 +793,8 @@ export const setupOtreeHandlers = (mainWindow: BrowserWindow): void => {
 
       // Reinstall virtualenv
       await new Promise<void>((resolve, reject) => {
+        // Removed shell: true for security
         const proc = spawn(pipExe, ['install', '--force-reinstall', 'virtualenv'], {
-          shell: true,
           cwd: pythonDir
         })
 
@@ -778,10 +831,11 @@ function sendStatus(window: BrowserWindow, msg: string): void {
   logToUIAndFile(window, message)
 }
 
-// Helper: The Template
-// We return a Record<string, any> (or a specific Interface if you want to be very strict)
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-function generateComposeConfig(): Record<string, any> {
+// Helper: Generate Docker Compose configuration with secure credentials
+function generateComposeConfig(): DockerComposeConfig {
+  // Generate a secure random password for the database
+  const dbPassword = generateSecurePassword(24)
+
   return {
     version: '3',
     services: {
@@ -790,7 +844,7 @@ function generateComposeConfig(): Record<string, any> {
         environment: {
           POSTGRES_DB: 'django_db',
           POSTGRES_USER: 'otree',
-          POSTGRES_PASSWORD: 'password'
+          POSTGRES_PASSWORD: dbPassword
         }
       },
       redis: {
@@ -810,7 +864,7 @@ function generateComposeConfig(): Record<string, any> {
         ports: ['8000:8000'],
         depends_on: ['db', 'redis'],
         environment: {
-          DATABASE_URL: 'postgres://otree:password@db/django_db',
+          DATABASE_URL: `postgres://otree:${dbPassword}@db/django_db`,
           REDIS_URL: 'redis://redis:6379',
           OTREE_AUTH_LEVEL: 'DEMO',
           OTREE_PRODUCTION: '0'

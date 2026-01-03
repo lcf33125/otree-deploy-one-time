@@ -685,13 +685,28 @@ const App: React.FC = () => {
       <div className="flex-1 flex flex-col min-w-0 bg-black border-l border-border">
         <div className="flex items-center justify-between px-4 py-2 border-b border-border/50 bg-card/20">
           <h2 className="text-sm font-semibold text-muted-foreground uppercase tracking-wider">
-            Logs
+            Terminal Output
           </h2>
           <button
             onClick={() => setLogs([])}
-            className="text-xs text-muted-foreground hover:text-foreground transition-colors"
+            className="text-xs text-muted-foreground hover:text-foreground transition-colors flex items-center gap-1"
+            title="Clear all logs"
           >
-            Clear
+            <svg
+              xmlns="http://www.w3.org/2000/svg"
+              width="12"
+              height="12"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            >
+              <polyline points="3 6 5 6 21 6" />
+              <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+            </svg>
+            Clear All
           </button>
         </div>
         <div className="flex-1 relative">

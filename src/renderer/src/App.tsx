@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react'
 import LogViewer from './components/LogViewer'
 import SettingsModal from './components/SettingsModal'
 import PythonVersionManager from './components/PythonVersionManager'
+import WelcomeWizard from './components/WelcomeWizard'
 
 // 1. Define the shape of the API exposed from preload.js
 interface IElectronAPI {
@@ -32,6 +33,13 @@ interface IElectronAPI {
   deletePython: (version: string) => Promise<{ success: boolean; error?: string }>
   isPythonInstalled: (version: string) => Promise<boolean>
   repairPython: (version: string) => Promise<{ success: boolean; error?: string }>
+  // Sample Project
+  extractSampleProject: () => Promise<{
+    success: boolean
+    path?: string
+    message?: string
+    error?: string
+  }>
   // Listeners
   onLogs: (callback: (log: string) => void) => void
   onStatusChange: (callback: (status: string) => void) => void
@@ -89,6 +97,15 @@ const App: React.FC = () => {
   const [currentPythonVersion, setCurrentPythonVersion] = useState<string | null>(null)
   const [hasScannedPython, setHasScannedPython] = useState(false)
   const [serverUrl, setServerUrl] = useState<string | null>(null)
+  const [showWelcomeWizard, setShowWelcomeWizard] = useState(false)
+
+  // Check if this is the first launch
+  useEffect(() => {
+    const hasCompletedWelcome = localStorage.getItem('otree-launcher-welcome-completed')
+    if (!hasCompletedWelcome) {
+      setShowWelcomeWizard(true)
+    }
+  }, [])
 
   // Auto-scan for Python versions on first load
   useEffect(() => {
@@ -265,14 +282,89 @@ const App: React.FC = () => {
     ])
   }
 
+  // Handle Welcome Wizard completion
+  const handleWelcomeComplete = (config: {
+    projectPath?: string
+    pythonVersion?: string
+    pythonPath?: string
+  }): void => {
+    // Mark welcome as completed
+    localStorage.setItem('otree-launcher-welcome-completed', 'true')
+    setShowWelcomeWizard(false)
+
+    // Apply configuration from wizard
+    if (config.pythonPath && config.pythonVersion) {
+      handlePythonVersionSelect(config.pythonVersion, config.pythonPath)
+    }
+
+    if (config.projectPath) {
+      setProjectPath(config.projectPath)
+      setInstallStatus('idle')
+      window.api.checkRequirements(config.projectPath, config.pythonPath || settings.pythonCommand)
+    }
+
+    // Log completion
+    setLogs((prev) => [
+      ...prev,
+      '[SYSTEM] Welcome wizard completed! You can now start using oTree Launcher.\n'
+    ])
+  }
+
+  // Handle Welcome Wizard skip
+  const handleWelcomeSkip = (): void => {
+    localStorage.setItem('otree-launcher-welcome-completed', 'true')
+    setShowWelcomeWizard(false)
+    setLogs((prev) => [
+      ...prev,
+      '[SYSTEM] Welcome wizard skipped. You can access features from the main interface.\n'
+    ])
+  }
+
+  // Handle Welcome Wizard reset
+  const handleResetWizard = (): void => {
+    localStorage.removeItem('otree-launcher-welcome-completed')
+    setShowWelcomeWizard(true)
+    setLogs((prev) => [
+      ...prev,
+      '[SYSTEM] Welcome wizard restarted.\n'
+    ])
+  }
+
   return (
-    <div className="flex flex-col md:flex-row h-screen bg-background text-foreground overflow-hidden font-sans">
-      {/* Left Panel: Controls */}
+    <>
+      {/* Welcome Wizard */}
+      {showWelcomeWizard && (
+        <WelcomeWizard onComplete={handleWelcomeComplete} onSkip={handleWelcomeSkip} />
+      )}
+
+      <div className="flex flex-col md:flex-row h-screen bg-background text-foreground overflow-hidden font-sans">
+        {/* Left Panel: Controls */}
       <div className="w-full md:w-[450px] flex flex-col border-r border-border bg-card/30 p-6 space-y-8 overflow-y-auto shrink-0">
         {/* Header */}
         <div className="flex justify-between items-center border-b border-border pb-6">
           <h1 className="text-2xl font-bold tracking-tight">oTree Launcher</h1>
           <div className="flex items-center gap-2">
+            <button
+              onClick={handleResetWizard}
+              className="p-2 rounded-md hover:bg-secondary text-muted-foreground hover:text-foreground transition-colors"
+              title="Help - Re-run Welcome Wizard"
+            >
+              <svg
+                xmlns="http://www.w3.org/2000/svg"
+                width="20"
+                height="20"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              >
+                <circle cx="12" cy="12" r="10" />
+                <path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3" />
+                <line x1="12" x2="12.01" y1="17" y2="17" />
+              </svg>
+            </button>
             <button
               onClick={() => setIsSettingsOpen(true)}
               className="p-2 rounded-md hover:bg-secondary text-muted-foreground hover:text-foreground transition-colors"
@@ -615,8 +707,10 @@ const App: React.FC = () => {
         onClose={() => setIsSettingsOpen(false)}
         settings={settings}
         onSave={handleSaveSettings}
+        onResetWizard={handleResetWizard}
       />
     </div>
+    </>
   )
 }
 

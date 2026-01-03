@@ -31,6 +31,9 @@ const api = {
   isPythonInstalled: (version) => ipcRenderer.invoke('python:is-installed', version),
   repairPython: (version) => ipcRenderer.invoke('python:repair', version),
 
+  // Sample Project
+  extractSampleProject: () => ipcRenderer.invoke('sample:extract'),
+
   // Listeners
   onLogs: (callback) => ipcRenderer.on('otree:logs', (_event, value) => callback(value)),
   onStatusChange: (callback) => ipcRenderer.on('otree:status', (_event, value) => callback(value)),

@@ -11,13 +11,15 @@ interface SettingsModalProps {
   onClose: () => void
   settings: Settings
   onSave: (newSettings: Settings) => void
+  onResetWizard?: () => void
 }
 
 const SettingsModal: React.FC<SettingsModalProps> = ({
   isOpen,
   onClose,
   settings,
-  onSave
+  onSave,
+  onResetWizard
 }): React.ReactElement | null => {
   const [localSettings, setLocalSettings] = React.useState<Settings>(settings)
   const [pythonVersions, setPythonVersions] = React.useState<{ version: string; path: string }[]>([])
@@ -149,6 +151,40 @@ const SettingsModal: React.FC<SettingsModalProps> = ({
             </p>
           </div>
         </div>
+
+        {/* Help Section */}
+        {onResetWizard && (
+          <div className="mt-6 pt-6 border-t border-border">
+            <div className="space-y-2">
+              <h3 className="text-sm font-semibold text-foreground">Help & Tutorials</h3>
+              <button
+                onClick={() => {
+                  onResetWizard()
+                  onClose()
+                }}
+                className="w-full flex items-center gap-2 rounded-md border border-border bg-secondary/50 px-4 py-3 text-sm font-medium text-foreground hover:bg-secondary transition-colors"
+              >
+                <svg
+                  xmlns="http://www.w3.org/2000/svg"
+                  width="16"
+                  height="16"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="2"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                >
+                  <path d="M21.5 2v6h-6M2.5 22v-6h6M2 11.5a10 10 0 0 1 18.8-4.3M22 12.5a10 10 0 0 1-18.8 4.2"/>
+                </svg>
+                Re-run Welcome Wizard
+              </button>
+              <p className="text-xs text-muted-foreground">
+                Start the setup tutorial again to review basic features
+              </p>
+            </div>
+          </div>
+        )}
 
         <div className="mt-6 flex justify-end gap-3">
           <button

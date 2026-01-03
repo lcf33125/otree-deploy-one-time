@@ -37,7 +37,10 @@ export const IPC_CHANNELS = {
 
   // Misc
   PING: 'ping',
-  OPEN_URL: 'open-url'
+  OPEN_URL: 'open-url',
+
+  // Sample Project
+  EXTRACT_SAMPLE_PROJECT: 'sample:extract'
 } as const
 
 // Docker Compose file name

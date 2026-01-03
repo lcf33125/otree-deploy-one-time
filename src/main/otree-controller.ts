@@ -823,6 +823,58 @@ export const setupOtreeHandlers = (mainWindow: BrowserWindow): void => {
       }
     }
   })
+
+  // 18. Handler: Extract sample project to documents folder
+  ipcMain.handle(IPC_CHANNELS.EXTRACT_SAMPLE_PROJECT, async () => {
+    try {
+      const docsPath = app.getPath('documents')
+      const targetPath = path.join(docsPath, 'oTree-Sample-Project')
+
+      // Check if project already exists
+      if (await fs.pathExists(targetPath)) {
+        return {
+          success: false,
+          path: targetPath,
+          error: 'Sample project already exists at this location. Please delete it first or choose a different location.'
+        }
+      }
+
+      // Determine resources path based on environment
+      let resourcesPath: string
+      if (app.isPackaged) {
+        // Production: use process.resourcesPath
+        resourcesPath = process.resourcesPath
+      } else {
+        // Development: go up from out/main/index.js to project root, then to resources
+        // __dirname in dev is: /path/to/project/out/main
+        resourcesPath = path.join(__dirname, '../../resources')
+      }
+
+      const sourcePath = path.join(resourcesPath, 'risk_preferences-main', 'risk_preferences-main')
+
+      // Verify source exists
+      if (!(await fs.pathExists(sourcePath))) {
+        return {
+          success: false,
+          error: `Sample project not found in resources: ${sourcePath}. App packaged: ${app.isPackaged}, Resources path: ${resourcesPath}`
+        }
+      }
+
+      // Copy the entire project directory
+      await fs.copy(sourcePath, targetPath)
+
+      return {
+        success: true,
+        path: targetPath,
+        message: `Sample project extracted to: ${targetPath}`
+      }
+    } catch (error) {
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : 'Failed to extract sample project'
+      }
+    }
+  })
 }
 
 // Helper: Send status updates

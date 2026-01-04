@@ -57,12 +57,14 @@ npm run build:unpack     # Build without packaging (useful for testing)
 ### Core Modules
 
 #### [src/main/otree-controller.ts](src/main/otree-controller.ts)
-Central orchestration for oTree operations. Registers 17 IPC handlers including:
+Central orchestration for oTree operations. Registers 20 IPC handlers including:
 - `dialog:openFolder` - Directory selection
 - `otree:start` - Docker Compose mode (generates `docker-compose-launcher.yml`)
 - `otree:start-python` - Python venv mode
 - `otree:install-requirements` - Creates venv and installs dependencies
 - `otree:stop` - Stops running processes
+- `otree:create-project` - Creates new oTree project using `otree startproject`
+- `otree:validate-project` - Validates existing oTree project structure
 - `python:*` - Python version management handlers
 
 **Key Implementation Details:**
@@ -71,6 +73,15 @@ Central orchestration for oTree operations. Registers 17 IPC handlers including:
 - On Windows, uses `taskkill /T /F` to kill process trees (regular `.kill()` only kills shell)
 - Detects server readiness by parsing logs for `http://localhost:{port}`
 - Injects system messages when detecting Control+C instructions
+
+**Project Creation:**
+- Executes `otree startproject <name>` directly (not via `python -m otree`)
+- Automatically installs oTree if not found in the Python environment
+- Locates otree executable in Python's Scripts directory (Windows) or bin directory (Unix)
+- Sends progress updates via `otree:creation-progress` events
+- Validates project creation by checking for `settings.py`
+- Handles interactive prompts by automatically sending 'y' or 'n' via stdin based on user preference
+- Uses 1-second delay before sending stdin to ensure prompt is ready
 
 #### [src/main/python-manager.ts](src/main/python-manager.ts)
 Manages Python installations (download, install, track):
@@ -197,6 +208,40 @@ Preload uses plain JavaScript at runtime but must match renderer's TypeScript in
 3. Expose in [src/preload/index.ts](src/preload/index.ts): Add to `api` object
 4. Add to renderer interface (if using TypeScript)
 
+### Creating New oTree Projects
+
+The app supports creating new oTree projects via the Welcome Wizard or programmatically:
+
+**Via Welcome Wizard ([src/renderer/src/components/WelcomeWizard.tsx](src/renderer/src/components/WelcomeWizard.tsx)):**
+1. User selects "Create New Project" option
+2. Enters project name, location, and template preference (with/without samples)
+3. App calls `window.api.createOtreeProject()` with parameters
+4. Backend installs oTree if needed, then runs `otree startproject`
+5. Progress updates sent via `otree:creation-progress` events
+6. Project path auto-populated on completion
+
+**Project Validation:**
+- Use `window.api.validateOtreeProject(path)` to check existing projects
+- Validates presence of `settings.py` and `requirements.txt`
+- Returns validation result with `isValid` flag and message
+
+**Flow:**
+```typescript
+// Create new project
+const result = await window.api.createOtreeProject({
+  projectName: 'my_experiment',
+  targetPath: '/path/to/parent/directory',
+  pythonPath: '/path/to/python',
+  includeSamples: true  // false for empty project
+})
+
+// Validate existing project
+const validation = await window.api.validateOtreeProject('/path/to/project')
+if (validation.isValid) {
+  // Proceed with project
+}
+```
+
 ### Updating Docker Config
 
 Edit `generateComposeConfig()` in [otree-controller.ts](src/main/otree-controller.ts). File regenerates on each start, so changes take effect immediately.
@@ -240,3 +285,23 @@ Edit `generateComposeConfig()` in [otree-controller.ts](src/main/otree-controlle
 - [src/main/utils.ts](src/main/utils.ts) - Validation utilities
 - [src/preload/index.ts](src/preload/index.ts) - IPC bridge
 - [src/renderer/src/App.tsx](src/renderer/src/App.tsx) - Main UI component
+- [src/renderer/src/components/WelcomeWizard.tsx](src/renderer/src/components/WelcomeWizard.tsx) - Onboarding wizard
+
+## Welcome Wizard
+
+The Welcome Wizard guides new users through initial setup with a 4-step flow:
+
+1. **Welcome**: Overview of the setup process
+2. **Python Setup**: Scan/select Python installation
+3. **Project Setup**: Three options:
+   - **Create New Project**: Use `otree startproject` with optional samples
+   - **Open Existing Project**: Browse and validate existing oTree project
+   - **Skip**: Continue to main interface without project setup
+4. **Complete**: Summary and next steps
+
+**Key Features:**
+- First-launch detection via localStorage flag `otree-launcher-welcome-completed`
+- Can be re-triggered via Settings → "Reset Welcome Wizard"
+- Auto-populates project path and Python version in main interface
+- Real-time validation of existing projects (checks for `settings.py`)
+- Progress tracking for project creation with status updates

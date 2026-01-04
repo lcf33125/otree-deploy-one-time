@@ -46,9 +46,9 @@ const SettingsModal: React.FC<SettingsModalProps> = ({
   }
 
   const handleBrowse = async (): Promise<void> => {
-    const path = await window.api.selectFolder()
-    if (path) {
-      setLocalSettings({ ...localSettings, defaultProjectPath: path })
+    const result = await window.api.selectFolder()
+    if (result && result.length > 0) {
+      setLocalSettings({ ...localSettings, defaultProjectPath: result[0] })
     }
   }
 

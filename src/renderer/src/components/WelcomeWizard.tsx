@@ -10,14 +10,25 @@ interface WelcomeWizardProps {
 }
 
 type WizardStep = 'welcome' | 'python' | 'project' | 'complete'
+type ProjectSetupOption = 'create' | 'open' | 'skip'
 
 const WelcomeWizard: React.FC<WelcomeWizardProps> = ({ onComplete, onSkip }) => {
   const [currentStep, setCurrentStep] = useState<WizardStep>('welcome')
   const [pythonVersions, setPythonVersions] = useState<Array<{ version: string; path: string }>>([])
   const [selectedPython, setSelectedPython] = useState<{ version: string; path: string } | null>(null)
   const [isScanning, setIsScanning] = useState(false)
-  const [sampleProjectPath, setSampleProjectPath] = useState<string>('')
-  const [isDownloadingSample, setIsDownloadingSample] = useState(false)
+
+  // Project setup state
+  const [projectSetupOption, setProjectSetupOption] = useState<ProjectSetupOption | null>(null)
+  const [projectName, setProjectName] = useState('')
+  const [projectLocation, setProjectLocation] = useState('')
+  const [includeSamples, setIncludeSamples] = useState(true)
+  const [existingProjectPath, setExistingProjectPath] = useState('')
+  const [isCreatingProject, setIsCreatingProject] = useState(false)
+  const [isValidatingProject, setIsValidatingProject] = useState(false)
+  const [validationMessage, setValidationMessage] = useState('')
+  const [createdProjectPath, setCreatedProjectPath] = useState('')
+  const [creationProgress, setCreationProgress] = useState({ percent: 0, status: '' })
 
   // Auto-scan for Python when reaching the Python step
   useEffect(() => {
@@ -25,6 +36,32 @@ const WelcomeWizard: React.FC<WelcomeWizardProps> = ({ onComplete, onSkip }) => 
       scanPython()
     }
   }, [currentStep])
+
+  // Set default project location when component mounts
+  useEffect(() => {
+    const getDefaultLocation = async () => {
+      try {
+        const documentsPath = await window.api.getDocumentsPath()
+        setProjectLocation(documentsPath)
+      } catch (error) {
+        console.error('Failed to get documents path:', error)
+      }
+    }
+    getDefaultLocation()
+  }, [])
+
+  // Listen for project creation progress
+  useEffect(() => {
+    const handleProgress = (data: { percent: number; status: string; projectName: string }) => {
+      setCreationProgress({ percent: data.percent, status: data.status })
+    }
+
+    window.api.onProjectCreationProgress(handleProgress)
+
+    return () => {
+      // Cleanup listener
+    }
+  }, [])
 
   const scanPython = async () => {
     setIsScanning(true)
@@ -45,24 +82,112 @@ const WelcomeWizard: React.FC<WelcomeWizardProps> = ({ onComplete, onSkip }) => 
     }
   }
 
-  const handleDownloadSampleProject = async () => {
-    setIsDownloadingSample(true)
+  const handleBrowseProjectLocation = async () => {
     try {
-      const result = await window.api.extractSampleProject()
-
-      if (result.success && result.path) {
-        setSampleProjectPath(result.path)
-        setIsDownloadingSample(false)
-        setCurrentStep('complete')
-      } else {
-        // Show error
-        alert(result.error || 'Failed to extract sample project')
-        setIsDownloadingSample(false)
+      const result = await window.api.selectFolder()
+      if (result && result.length > 0) {
+        setProjectLocation(result[0])
       }
     } catch (error) {
-      console.error('Failed to extract sample project:', error)
-      alert('An error occurred while extracting the sample project')
-      setIsDownloadingSample(false)
+      console.error('Failed to select folder:', error)
+    }
+  }
+
+  const handleBrowseExistingProject = async () => {
+    try {
+      const result = await window.api.selectFolder()
+      if (result && result.length > 0) {
+        const selectedPath = result[0]
+        setExistingProjectPath(selectedPath)
+        await validateProject(selectedPath)
+      }
+    } catch (error) {
+      console.error('Failed to select folder:', error)
+      setValidationMessage('✗ Failed to open folder browser')
+    }
+  }
+
+  const validateProject = async (projectPath: string) => {
+    if (!projectPath) {
+      setValidationMessage('')
+      return
+    }
+
+    console.log('[Frontend] Validating project path:', projectPath)
+
+    // Clear previous message
+    setValidationMessage('')
+    setIsValidatingProject(true)
+
+    try {
+      const result = await window.api.validateOtreeProject(projectPath)
+      console.log('[Frontend] Validation result:', result)
+
+      if (result.success && result.isValid) {
+        setValidationMessage('✓ Valid oTree project')
+      } else {
+        setValidationMessage(`✗ ${result.message || result.error || 'Not a valid oTree project'}`)
+      }
+    } catch (error) {
+      console.error('Validation error:', error)
+      setValidationMessage('✗ Failed to validate project')
+    } finally {
+      setIsValidatingProject(false)
+    }
+  }
+
+  // Add handler for manual path validation
+  const handleValidateManualPath = async () => {
+    if (existingProjectPath && existingProjectPath.trim()) {
+      await validateProject(existingProjectPath.trim())
+    }
+  }
+
+  const handleCreateProject = async () => {
+    if (!projectName || !projectLocation || !selectedPython) {
+      alert('Please fill in all required fields')
+      return
+    }
+
+    setIsCreatingProject(true)
+    setCreationProgress({ percent: 0, status: 'Starting...' })
+
+    try {
+      const result = await window.api.createOtreeProject({
+        projectName,
+        targetPath: projectLocation,
+        pythonPath: selectedPython.path,
+        includeSamples
+      })
+
+      if (result.success && result.projectPath) {
+        setCreatedProjectPath(result.projectPath)
+        setCurrentStep('complete')
+      } else {
+        alert(result.error || 'Failed to create project')
+      }
+    } catch (error) {
+      console.error('Failed to create project:', error)
+      alert('An error occurred while creating the project')
+    } finally {
+      setIsCreatingProject(false)
+    }
+  }
+
+  const handleOpenExistingProject = async () => {
+    if (!existingProjectPath) {
+      alert('Please select a project folder')
+      return
+    }
+
+    // Validate one more time before proceeding
+    const result = await window.api.validateOtreeProject(existingProjectPath)
+
+    if (result.success && result.isValid) {
+      setCreatedProjectPath(existingProjectPath)
+      setCurrentStep('complete')
+    } else {
+      alert(result.message || 'Not a valid oTree project')
     }
   }
 
@@ -73,8 +198,8 @@ const WelcomeWizard: React.FC<WelcomeWizardProps> = ({ onComplete, onSkip }) => 
       pythonPath?: string
     } = {}
 
-    if (sampleProjectPath) {
-      config.projectPath = sampleProjectPath
+    if (createdProjectPath) {
+      config.projectPath = createdProjectPath
     }
 
     if (selectedPython) {
@@ -126,8 +251,8 @@ const WelcomeWizard: React.FC<WelcomeWizardProps> = ({ onComplete, onSkip }) => 
               2
             </div>
             <div>
-              <p className="font-medium">Download Sample Project (Optional)</p>
-              <p className="text-sm text-muted-foreground">Try out a simple Trust Game experiment</p>
+              <p className="font-medium">Set Up Your Project</p>
+              <p className="text-sm text-muted-foreground">Create new, open existing, or skip for later</p>
             </div>
           </div>
           <div className="flex items-start gap-3">
@@ -309,167 +434,438 @@ const WelcomeWizard: React.FC<WelcomeWizardProps> = ({ onComplete, onSkip }) => 
     </div>
   )
 
-  const renderProjectStep = () => (
-    <div className="space-y-6">
-      <div className="space-y-2">
-        <h2 className="text-2xl font-bold">Sample Project</h2>
-        <p className="text-muted-foreground">
-          Would you like to extract a sample Risk Preferences experiment to get started?
-        </p>
-      </div>
-
-      <div className="bg-gradient-to-br from-blue-500/10 to-purple-500/10 border border-blue-500/20 rounded-lg p-6 space-y-4">
-        <div className="flex items-start gap-4">
-          <div className="w-12 h-12 rounded-lg bg-blue-500/20 flex items-center justify-center shrink-0">
-            <svg
-              xmlns="http://www.w3.org/2000/svg"
-              width="24"
-              height="24"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="2"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-              className="text-blue-400"
-            >
-              <path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z" />
-            </svg>
-          </div>
-          <div className="flex-1">
-            <h3 className="font-semibold text-lg">Risk Preferences Sample</h3>
-            <p className="text-sm text-muted-foreground mt-1">
-              A classic behavioral economics experiment for measuring risk attitudes. Perfect for learning oTree basics!
+  const renderProjectStep = () => {
+    if (!projectSetupOption) {
+      return (
+        <div className="space-y-6">
+          <div className="space-y-2">
+            <h2 className="text-2xl font-bold">Project Setup</h2>
+            <p className="text-muted-foreground">
+              How would you like to set up your oTree project?
             </p>
-            <div className="mt-3 flex flex-wrap gap-2">
-              <span className="inline-flex items-center gap-1 px-2 py-1 rounded-md bg-blue-500/20 text-blue-400 text-xs">
-                <svg
-                  xmlns="http://www.w3.org/2000/svg"
-                  width="12"
-                  height="12"
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  stroke="currentColor"
-                  strokeWidth="2"
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                >
-                  <polyline points="20 6 9 17 4 12" />
-                </svg>
-                Beginner-friendly
-              </span>
-              <span className="inline-flex items-center gap-1 px-2 py-1 rounded-md bg-purple-500/20 text-purple-400 text-xs">
-                <svg
-                  xmlns="http://www.w3.org/2000/svg"
-                  width="12"
-                  height="12"
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  stroke="currentColor"
-                  strokeWidth="2"
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                >
-                  <polyline points="20 6 9 17 4 12" />
-                </svg>
-                Included in app
-              </span>
-              <span className="inline-flex items-center gap-1 px-2 py-1 rounded-md bg-green-500/20 text-green-400 text-xs">
-                <svg
-                  xmlns="http://www.w3.org/2000/svg"
-                  width="12"
-                  height="12"
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  stroke="currentColor"
-                  strokeWidth="2"
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                >
-                  <polyline points="20 6 9 17 4 12" />
-                </svg>
-                Single-player
-              </span>
-            </div>
+          </div>
+
+          <div className="space-y-3">
+            {/* Option 1: Create New Project */}
+            <button
+              onClick={() => setProjectSetupOption('create')}
+              className="w-full text-left p-5 rounded-lg border border-border hover:border-blue-500 hover:bg-blue-500/5 transition-all group"
+            >
+              <div className="flex items-start gap-4">
+                <div className="w-12 h-12 rounded-lg bg-blue-500/20 flex items-center justify-center shrink-0 group-hover:bg-blue-500/30 transition-colors">
+                  <svg
+                    xmlns="http://www.w3.org/2000/svg"
+                    width="24"
+                    height="24"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="2"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    className="text-blue-400"
+                  >
+                    <path d="M12 5v14M5 12h14" />
+                  </svg>
+                </div>
+                <div className="flex-1">
+                  <h3 className="font-semibold text-lg">Create New Project</h3>
+                  <p className="text-sm text-muted-foreground mt-1">
+                    Use <code className="text-xs bg-secondary px-1 py-0.5 rounded">otree startproject</code> to create a new oTree project with optional sample apps
+                  </p>
+                </div>
+              </div>
+            </button>
+
+            {/* Option 2: Open Existing Project */}
+            <button
+              onClick={() => setProjectSetupOption('open')}
+              className="w-full text-left p-5 rounded-lg border border-border hover:border-purple-500 hover:bg-purple-500/5 transition-all group"
+            >
+              <div className="flex items-start gap-4">
+                <div className="w-12 h-12 rounded-lg bg-purple-500/20 flex items-center justify-center shrink-0 group-hover:bg-purple-500/30 transition-colors">
+                  <svg
+                    xmlns="http://www.w3.org/2000/svg"
+                    width="24"
+                    height="24"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="2"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    className="text-purple-400"
+                  >
+                    <path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z" />
+                  </svg>
+                </div>
+                <div className="flex-1">
+                  <h3 className="font-semibold text-lg">Open Existing Project</h3>
+                  <p className="text-sm text-muted-foreground mt-1">
+                    Browse to an existing oTree project folder on your computer
+                  </p>
+                </div>
+              </div>
+            </button>
+
+            {/* Option 3: Skip */}
+            <button
+              onClick={() => {
+                setProjectSetupOption('skip')
+                setCurrentStep('complete')
+              }}
+              className="w-full text-left p-5 rounded-lg border border-border hover:border-gray-500 hover:bg-secondary/50 transition-all group"
+            >
+              <div className="flex items-start gap-4">
+                <div className="w-12 h-12 rounded-lg bg-gray-500/20 flex items-center justify-center shrink-0 group-hover:bg-gray-500/30 transition-colors">
+                  <svg
+                    xmlns="http://www.w3.org/2000/svg"
+                    width="24"
+                    height="24"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="2"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    className="text-gray-400"
+                  >
+                    <path d="M5 12h14M12 5l7 7-7 7" />
+                  </svg>
+                </div>
+                <div className="flex-1">
+                  <h3 className="font-semibold text-lg">Skip for Now</h3>
+                  <p className="text-sm text-muted-foreground mt-1">
+                    I'll set up my project later from the main interface
+                  </p>
+                </div>
+              </div>
+            </button>
+          </div>
+
+          <div className="flex gap-3">
+            <button
+              onClick={() => setCurrentStep('python')}
+              className="flex-1 h-12 px-6 rounded-md border border-border hover:bg-secondary transition-colors"
+            >
+              Back
+            </button>
           </div>
         </div>
-      </div>
+      )
+    }
 
-      <div className="bg-card border border-border rounded-lg p-4">
-        <p className="text-sm text-muted-foreground">
-          <strong className="text-foreground">Note:</strong> The sample project will be extracted to your Documents folder.
-          You can also skip this step and select your own oTree project folder in the main interface.
-        </p>
-      </div>
+    // Create New Project Sub-interface
+    if (projectSetupOption === 'create') {
+      return (
+        <div className="space-y-6">
+          <div className="space-y-2">
+            <h2 className="text-2xl font-bold">Create New Project</h2>
+            <p className="text-muted-foreground">
+              Configure your new oTree project settings
+            </p>
+          </div>
 
-      <div className="flex gap-3">
-        <button
-          onClick={() => setCurrentStep('python')}
-          className="px-6 h-12 rounded-md border border-border hover:bg-secondary transition-colors"
-        >
-          Back
-        </button>
-        <button
-          onClick={() => {
-            setCurrentStep('complete')
-          }}
-          className="flex-1 h-12 px-6 rounded-md border border-border hover:bg-secondary transition-colors"
-        >
-          Skip Sample
-        </button>
-        <button
-          onClick={handleDownloadSampleProject}
-          disabled={isDownloadingSample}
-          className="flex-1 h-12 px-6 rounded-md bg-blue-600 hover:bg-blue-500 text-white font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
-        >
-          {isDownloadingSample ? (
-            <>
-              <svg
-                className="animate-spin h-4 w-4"
-                xmlns="http://www.w3.org/2000/svg"
-                fill="none"
-                viewBox="0 0 24 24"
-              >
-                <circle
-                  className="opacity-25"
-                  cx="12"
-                  cy="12"
-                  r="10"
-                  stroke="currentColor"
-                  strokeWidth="4"
-                ></circle>
-                <path
-                  className="opacity-75"
-                  fill="currentColor"
-                  d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"
-                ></path>
-              </svg>
-              Preparing...
-            </>
-          ) : (
-            <>
-              <svg
-                xmlns="http://www.w3.org/2000/svg"
-                width="16"
-                height="16"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="2"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-              >
-                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
-                <polyline points="7 10 12 15 17 10" />
-                <line x1="12" x2="12" y1="15" y2="3" />
-              </svg>
-              Get Sample Project
-            </>
+          <div className="bg-card border border-border rounded-lg p-6 space-y-4">
+            {/* Project Name */}
+            <div className="space-y-2">
+              <label className="text-sm font-medium">Project Name</label>
+              <input
+                type="text"
+                value={projectName}
+                onChange={(e) => setProjectName(e.target.value)}
+                placeholder="e.g., my_experiment"
+                className="w-full px-3 py-2 bg-background border border-border rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+              />
+              <p className="text-xs text-muted-foreground">
+                Use lowercase letters, numbers, and underscores only
+              </p>
+            </div>
+
+            {/* Project Location */}
+            <div className="space-y-2">
+              <label className="text-sm font-medium">Location</label>
+              <div className="flex gap-2">
+                <input
+                  type="text"
+                  value={projectLocation}
+                  onChange={(e) => setProjectLocation(e.target.value)}
+                  className="flex-1 px-3 py-2 bg-background border border-border rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                />
+                <button
+                  onClick={handleBrowseProjectLocation}
+                  className="px-4 py-2 border border-border rounded-md hover:bg-secondary transition-colors"
+                >
+                  Browse
+                </button>
+              </div>
+              <p className="text-xs text-muted-foreground">
+                Project will be created at: {projectLocation}/{projectName}
+              </p>
+            </div>
+
+            {/* Include Samples */}
+            <div className="space-y-2">
+              <label className="text-sm font-medium">Template</label>
+              <div className="space-y-2">
+                <button
+                  onClick={() => setIncludeSamples(true)}
+                  className={`w-full text-left p-3 rounded-lg border transition-colors ${
+                    includeSamples
+                      ? 'border-blue-500 bg-blue-500/10'
+                      : 'border-border hover:border-blue-500/50'
+                  }`}
+                >
+                  <div className="flex items-center gap-3">
+                    <div className={`w-4 h-4 rounded-full border-2 flex items-center justify-center ${
+                      includeSamples ? 'border-blue-500' : 'border-muted-foreground'
+                    }`}>
+                      {includeSamples && (
+                        <div className="w-2 h-2 rounded-full bg-blue-500"></div>
+                      )}
+                    </div>
+                    <div className="flex-1">
+                      <p className="font-medium">With sample apps (Recommended)</p>
+                      <p className="text-xs text-muted-foreground">
+                        Includes Trust Game, Public Goods, and other examples
+                      </p>
+                    </div>
+                  </div>
+                </button>
+
+                <button
+                  onClick={() => setIncludeSamples(false)}
+                  className={`w-full text-left p-3 rounded-lg border transition-colors ${
+                    !includeSamples
+                      ? 'border-blue-500 bg-blue-500/10'
+                      : 'border-border hover:border-blue-500/50'
+                  }`}
+                >
+                  <div className="flex items-center gap-3">
+                    <div className={`w-4 h-4 rounded-full border-2 flex items-center justify-center ${
+                      !includeSamples ? 'border-blue-500' : 'border-muted-foreground'
+                    }`}>
+                      {!includeSamples && (
+                        <div className="w-2 h-2 rounded-full bg-blue-500"></div>
+                      )}
+                    </div>
+                    <div className="flex-1">
+                      <p className="font-medium">Empty project</p>
+                      <p className="text-xs text-muted-foreground">
+                        Blank project structure for experienced users
+                      </p>
+                    </div>
+                  </div>
+                </button>
+              </div>
+            </div>
+          </div>
+
+          {/* Progress Display */}
+          {isCreatingProject && (
+            <div className="bg-blue-500/10 border border-blue-500/20 rounded-lg p-4">
+              <div className="flex items-center gap-3 mb-2">
+                <svg
+                  className="animate-spin h-5 w-5 text-blue-400"
+                  xmlns="http://www.w3.org/2000/svg"
+                  fill="none"
+                  viewBox="0 0 24 24"
+                >
+                  <circle
+                    className="opacity-25"
+                    cx="12"
+                    cy="12"
+                    r="10"
+                    stroke="currentColor"
+                    strokeWidth="4"
+                  ></circle>
+                  <path
+                    className="opacity-75"
+                    fill="currentColor"
+                    d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"
+                  ></path>
+                </svg>
+                <span className="text-sm font-medium text-blue-400">{creationProgress.status}</span>
+              </div>
+              <div className="w-full bg-background rounded-full h-2">
+                <div
+                  className="bg-blue-500 h-2 rounded-full transition-all duration-300"
+                  style={{ width: `${creationProgress.percent}%` }}
+                ></div>
+              </div>
+              <p className="text-xs text-muted-foreground mt-2">
+                {creationProgress.percent}% complete
+              </p>
+            </div>
           )}
-        </button>
-      </div>
-    </div>
-  )
+
+          <div className="flex gap-3">
+            <button
+              onClick={() => setProjectSetupOption(null)}
+              disabled={isCreatingProject}
+              className="px-6 h-12 rounded-md border border-border hover:bg-secondary transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              Back
+            </button>
+            <button
+              onClick={handleCreateProject}
+              disabled={!projectName || !projectLocation || !selectedPython || isCreatingProject}
+              className="flex-1 h-12 px-6 rounded-md bg-blue-600 hover:bg-blue-500 text-white font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-blue-600 flex items-center justify-center gap-2"
+            >
+              {isCreatingProject ? (
+                <>
+                  <svg
+                    className="animate-spin h-4 w-4"
+                    xmlns="http://www.w3.org/2000/svg"
+                    fill="none"
+                    viewBox="0 0 24 24"
+                  >
+                    <circle
+                      className="opacity-25"
+                      cx="12"
+                      cy="12"
+                      r="10"
+                      stroke="currentColor"
+                      strokeWidth="4"
+                    ></circle>
+                    <path
+                      className="opacity-75"
+                      fill="currentColor"
+                      d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"
+                    ></path>
+                  </svg>
+                  Creating...
+                </>
+              ) : (
+                'Create Project'
+              )}
+            </button>
+          </div>
+        </div>
+      )
+    }
+
+    // Open Existing Project Sub-interface
+    if (projectSetupOption === 'open') {
+      return (
+        <div className="space-y-6">
+          <div className="space-y-2">
+            <h2 className="text-2xl font-bold">Open Existing Project</h2>
+            <p className="text-muted-foreground">
+              Browse to your existing oTree project folder
+            </p>
+          </div>
+
+          <div className="bg-card border border-border rounded-lg p-6 space-y-4">
+            <div className="space-y-2">
+              <label className="text-sm font-medium">Project Folder</label>
+              <div className="flex gap-2">
+                <input
+                  type="text"
+                  value={existingProjectPath}
+                  onChange={(e) => {
+                    setExistingProjectPath(e.target.value)
+                    setValidationMessage('')
+                  }}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') {
+                      handleValidateManualPath()
+                    }
+                  }}
+                  placeholder="Select your oTree project folder..."
+                  className="flex-1 px-3 py-2 bg-background border border-border rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                />
+                <button
+                  onClick={handleValidateManualPath}
+                  disabled={!existingProjectPath || isValidatingProject}
+                  className="px-4 py-2 border border-border rounded-md hover:bg-secondary transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                  title="Validate path"
+                >
+                  {isValidatingProject ? (
+                    <svg
+                      className="animate-spin h-5 w-5"
+                      xmlns="http://www.w3.org/2000/svg"
+                      fill="none"
+                      viewBox="0 0 24 24"
+                    >
+                      <circle
+                        className="opacity-25"
+                        cx="12"
+                        cy="12"
+                        r="10"
+                        stroke="currentColor"
+                        strokeWidth="4"
+                      ></circle>
+                      <path
+                        className="opacity-75"
+                        fill="currentColor"
+                        d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"
+                      ></path>
+                    </svg>
+                  ) : (
+                    <svg
+                      xmlns="http://www.w3.org/2000/svg"
+                      width="20"
+                      height="20"
+                      viewBox="0 0 24 24"
+                      fill="none"
+                      stroke="currentColor"
+                      strokeWidth="2"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                    >
+                      <polyline points="20 6 9 17 4 12" />
+                    </svg>
+                  )}
+                </button>
+                <button
+                  onClick={handleBrowseExistingProject}
+                  className="px-4 py-2 border border-border rounded-md hover:bg-secondary transition-colors"
+                >
+                  Browse
+                </button>
+              </div>
+
+              {/* Validation Status */}
+              {validationMessage && (
+                <p className={`text-sm mt-2 ${
+                  validationMessage.startsWith('✓')
+                    ? 'text-green-400'
+                    : 'text-red-400'
+                }`}>
+                  {validationMessage}
+                </p>
+              )}
+            </div>
+
+            <div className="bg-secondary/50 border border-border rounded-lg p-4">
+              <p className="text-sm text-muted-foreground">
+                <strong className="text-foreground">Note:</strong> We'll verify that the folder contains a valid oTree project (requires settings.py)
+              </p>
+            </div>
+          </div>
+
+          <div className="flex gap-3">
+            <button
+              onClick={() => setProjectSetupOption(null)}
+              className="px-6 h-12 rounded-md border border-border hover:bg-secondary transition-colors"
+            >
+              Back
+            </button>
+            <button
+              onClick={handleOpenExistingProject}
+              disabled={!existingProjectPath || !validationMessage.startsWith('✓')}
+              className="flex-1 h-12 px-6 rounded-md bg-blue-600 hover:bg-blue-500 text-white font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-blue-600"
+            >
+              Open Project
+            </button>
+          </div>
+        </div>
+      )
+    }
+
+    return null
+  }
 
   const renderCompleteStep = () => (
     <div className="space-y-6">
@@ -503,10 +899,14 @@ const WelcomeWizard: React.FC<WelcomeWizardProps> = ({ onComplete, onSkip }) => 
               1
             </div>
             <div>
-              <p className="font-medium">Select Your Project Folder</p>
+              <p className="font-medium">
+                {createdProjectPath ? 'Your Project is Ready' : 'Select Your Project Folder'}
+              </p>
               <p className="text-sm text-muted-foreground">
-                Click "Change Folder" to select your oTree project directory
-                {sampleProjectPath && ` (or use the sample at ${sampleProjectPath})`}
+                {createdProjectPath
+                  ? `Project located at: ${createdProjectPath}`
+                  : 'Click "Change Folder" to select your oTree project directory'
+                }
               </p>
             </div>
           </div>

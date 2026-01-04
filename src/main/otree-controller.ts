@@ -8,7 +8,7 @@ import util from 'util'
 import crypto from 'crypto'
 import { getPythonManager } from './python-manager'
 import { IPC_CHANNELS, DEFAULT_OTREE_PORT, DOCKER_COMPOSE_FILENAME, LOG_DIR, STATUS_MESSAGES, SYSTEM_MESSAGES, ERROR_CODES } from './constants'
-import type { DockerComposeConfig, VenvPaths } from './types'
+import type { DockerComposeConfig, VenvPaths, CreateProjectParams, CreateProjectResult, ValidateProjectResult } from './types'
 import { validateProjectPath, validateFilePath, generateSecurePassword, isManagedPython } from './utils'
 
 const execAsync = util.promisify(exec)
@@ -215,7 +215,8 @@ export const setupOtreeHandlers = (mainWindow: BrowserWindow): void => {
     const result = await dialog.showOpenDialog(mainWindow, {
       properties: ['openDirectory']
     })
-    return result.filePaths[0]
+    console.log('[Select Folder] Selected paths:', result.filePaths)
+    return result.filePaths  // Return the array, not just the first element
   })
 
   // 2. Handler: Start oTree (Docker)
@@ -875,6 +876,245 @@ export const setupOtreeHandlers = (mainWindow: BrowserWindow): void => {
       }
     }
   })
+
+  // Project Creation Handlers
+
+  // 19. Handler: Create new oTree project
+  ipcMain.handle(
+    IPC_CHANNELS.OTREE_CREATE_PROJECT,
+    async (_event, params: CreateProjectParams): Promise<CreateProjectResult> => {
+      const { projectName, targetPath, pythonPath, includeSamples } = params
+
+      try {
+        // Validate inputs
+        if (!projectName || !targetPath || !pythonPath) {
+          return {
+            success: false,
+            error: 'Missing required parameters'
+          }
+        }
+
+        // Construct full project path
+        const projectPath = path.join(targetPath, projectName)
+
+        // Check if project directory already exists
+        if (await fs.pathExists(projectPath)) {
+          return {
+            success: false,
+            error: `Project directory already exists: ${projectPath}`
+          }
+        }
+
+        // Ensure target directory exists
+        await fs.ensureDir(targetPath)
+
+        // First, check if otree is installed in the Python environment
+        // Get the directory containing the Python executable
+        const pythonDir = path.dirname(pythonPath)
+        const otreeCmd = process.platform === 'win32'
+          ? path.join(pythonDir, 'Scripts', 'otree.exe')
+          : path.join(pythonDir, 'otree')
+
+        let otreeInstalled = false
+        try {
+          // Check if otree command exists
+          if (await fs.pathExists(otreeCmd)) {
+            await execAsync(`"${otreeCmd}" --version`)
+            otreeInstalled = true
+          }
+        } catch (error) {
+          console.log('oTree not installed, will install it first')
+        }
+
+        // If otree is not installed, install it first
+        if (!otreeInstalled) {
+          mainWindow.webContents.send(IPC_CHANNELS.OTREE_PROJECT_CREATION_PROGRESS, {
+            percent: 10,
+            status: 'Installing oTree...',
+            projectName
+          })
+
+          try {
+            await execAsync(`"${pythonPath}" -m pip install otree`)
+
+            // Verify installation
+            if (!await fs.pathExists(otreeCmd)) {
+              return {
+                success: false,
+                error: 'oTree was installed but the otree command was not found. Please try installing oTree manually.'
+              }
+            }
+          } catch (error) {
+            return {
+              success: false,
+              error: `Failed to install oTree: ${error instanceof Error ? error.message : 'Unknown error'}`
+            }
+          }
+        }
+
+        // Send progress update
+        mainWindow.webContents.send(IPC_CHANNELS.OTREE_PROJECT_CREATION_PROGRESS, {
+          percent: 30,
+          status: 'Creating project...',
+          projectName
+        })
+
+        // Construct the otree startproject command arguments
+        const args = ['startproject', projectName]
+
+        // Execute otree startproject
+        const createProcess = spawn(otreeCmd, args, {
+          cwd: targetPath,
+          shell: false
+        })
+
+        let output = ''
+        let errorOutput = ''
+
+        // Handle stdin to automatically respond to prompts
+        if (createProcess.stdin) {
+          // Wait a bit for the prompt to appear, then send response
+          setTimeout(() => {
+            if (createProcess.stdin) {
+              // Send 'y' for samples or 'n' for no samples
+              createProcess.stdin.write(includeSamples ? 'y\n' : 'n\n')
+              createProcess.stdin.end()
+            }
+          }, 1000)
+        }
+
+        createProcess.stdout?.on('data', (data) => {
+          output += data.toString()
+          console.log('otree startproject:', data.toString())
+        })
+
+        createProcess.stderr?.on('data', (data) => {
+          errorOutput += data.toString()
+          console.error('otree startproject error:', data.toString())
+        })
+
+        // Wait for process to complete
+        const exitCode = await new Promise<number>((resolve) => {
+          createProcess.on('close', (code) => {
+            resolve(code || 0)
+          })
+        })
+
+        if (exitCode !== 0) {
+          return {
+            success: false,
+            error: `Project creation failed with exit code ${exitCode}: ${errorOutput}`
+          }
+        }
+
+        // Verify project was created
+        const projectCreated = await fs.pathExists(projectPath)
+        if (!projectCreated) {
+          return {
+            success: false,
+            error: 'Project directory was not created'
+          }
+        }
+
+        // Send final progress
+        mainWindow.webContents.send(IPC_CHANNELS.OTREE_PROJECT_CREATION_PROGRESS, {
+          percent: 100,
+          status: 'Project created successfully!',
+          projectName
+        })
+
+        return {
+          success: true,
+          projectPath,
+          message: `Project "${projectName}" created successfully at ${projectPath}`
+        }
+      } catch (error) {
+        console.error('Project creation error:', error)
+        return {
+          success: false,
+          error: error instanceof Error ? error.message : 'Unknown error occurred'
+        }
+      }
+    }
+  )
+
+  // 20. Handler: Validate existing oTree project
+  ipcMain.handle(
+    IPC_CHANNELS.OTREE_VALIDATE_PROJECT,
+    async (_event, projectPath: string): Promise<ValidateProjectResult> => {
+      try {
+        console.log('[Validate Project] Validating path:', projectPath)
+
+        // Check if directory exists first
+        const exists = await fs.pathExists(projectPath)
+        console.log('[Validate Project] Path exists:', exists)
+        if (!exists) {
+          return {
+            success: true,
+            isValid: false,
+            message: 'Directory does not exist'
+          }
+        }
+
+        // Check if it's a directory
+        const stat = await fs.stat(projectPath)
+        console.log('[Validate Project] Is directory:', stat.isDirectory())
+        if (!stat.isDirectory()) {
+          return {
+            success: true,
+            isValid: false,
+            message: 'Path is not a directory'
+          }
+        }
+
+        // Check for essential oTree files
+        const settingsPath = path.join(projectPath, 'settings.py')
+        const requirementsPath = path.join(projectPath, 'requirements.txt')
+
+        const hasSettings = await fs.pathExists(settingsPath)
+        const hasRequirements = await fs.pathExists(requirementsPath)
+        console.log('[Validate Project] Has settings.py:', hasSettings)
+        console.log('[Validate Project] Has requirements.txt:', hasRequirements)
+
+        // At minimum, should have settings.py
+        if (!hasSettings) {
+          return {
+            success: true,
+            isValid: false,
+            message: 'Not a valid oTree project (missing settings.py)'
+          }
+        }
+
+        // Optionally check if requirements.txt contains otree
+        let hasOtreeInRequirements = false
+        if (hasRequirements) {
+          try {
+            const requirementsContent = await fs.readFile(requirementsPath, 'utf-8')
+            hasOtreeInRequirements = requirementsContent.toLowerCase().includes('otree')
+          } catch (error) {
+            console.warn('Could not read requirements.txt:', error)
+          }
+        }
+
+        return {
+          success: true,
+          isValid: true,
+          projectPath,
+          message: hasOtreeInRequirements
+            ? 'Valid oTree project'
+            : 'Valid project structure (install requirements to confirm oTree installation)'
+        }
+      } catch (error) {
+        console.error('[Validate Project] Error:', error)
+        return {
+          success: false,
+          isValid: false,
+          error: error instanceof Error ? error.message : 'Validation failed'
+        }
+      }
+    }
+  )
+
 }
 
 // Helper: Send status updates

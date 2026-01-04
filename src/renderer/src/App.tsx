@@ -40,6 +40,25 @@ interface IElectronAPI {
     message?: string
     error?: string
   }>
+  // Project Creation
+  createOtreeProject: (params: {
+    projectName: string
+    targetPath: string
+    pythonPath: string
+    includeSamples: boolean
+  }) => Promise<{
+    success: boolean
+    projectPath?: string
+    message?: string
+    error?: string
+  }>
+  validateOtreeProject: (projectPath: string) => Promise<{
+    success: boolean
+    isValid: boolean
+    projectPath?: string
+    message?: string
+    error?: string
+  }>
   // Listeners
   onLogs: (callback: (log: string) => void) => void
   onStatusChange: (callback: (status: string) => void) => void
@@ -54,6 +73,9 @@ interface IElectronAPI {
       path?: string
       error?: string
     }) => void
+  ) => void
+  onProjectCreationProgress: (
+    callback: (data: { percent: number; status: string; projectName: string }) => void
   ) => void
   removeAllListeners: () => void
 }
@@ -212,8 +234,9 @@ const App: React.FC = () => {
   }, [projectPath, installStatus]) // Also reload when install status changes
 
   const handleSelectFolder = async (): Promise<void> => {
-    const path = await window.api.selectFolder()
-    if (path) {
+    const result = await window.api.selectFolder()
+    if (result && result.length > 0) {
+      const path = result[0]
       setProjectPath(path)
       setInstallStatus('idle') // Reset first
       window.api.checkRequirements(path, settings.pythonCommand) // Check if already installed

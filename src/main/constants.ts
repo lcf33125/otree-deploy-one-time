@@ -39,8 +39,13 @@ export const IPC_CHANNELS = {
   PING: 'ping',
   OPEN_URL: 'open-url',
 
-  // Sample Project
-  EXTRACT_SAMPLE_PROJECT: 'sample:extract'
+  // Sample Project (deprecated - will be removed)
+  EXTRACT_SAMPLE_PROJECT: 'sample:extract',
+
+  // Project Creation
+  OTREE_CREATE_PROJECT: 'otree:create-project',
+  OTREE_VALIDATE_PROJECT: 'otree:validate-project',
+  OTREE_PROJECT_CREATION_PROGRESS: 'otree:creation-progress'
 } as const
 
 // Docker Compose file name

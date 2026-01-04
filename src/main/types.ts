@@ -37,3 +37,33 @@ export interface CleanupResult {
   success: boolean
   message?: string
 }
+
+// Project creation types
+export interface CreateProjectParams {
+  projectName: string
+  targetPath: string
+  pythonPath: string
+  includeSamples: boolean
+}
+
+export interface CreateProjectResult {
+  success: boolean
+  projectPath?: string
+  message?: string
+  error?: string
+}
+
+export interface ValidateProjectResult {
+  success: boolean
+  isValid: boolean
+  projectPath?: string
+  message?: string
+  error?: string
+}
+
+export interface ProjectCreationProgress {
+  percent: number
+  status: string
+  projectName: string
+}
+

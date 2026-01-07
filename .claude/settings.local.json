@@ -5,7 +5,8 @@
       "Bash(npm run)",
       "Bash(npm run typecheck)",
       "Bash(npm run build)",
-      "Bash(otree startproject --help:*)"
+      "Bash(otree startproject --help:*)",
+      "Bash(cat package.json)"
     ]
   }
 }

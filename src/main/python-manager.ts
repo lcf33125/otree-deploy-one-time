@@ -21,35 +21,40 @@ interface PythonRegistry {
   projectPreferences: Record<string, string> // projectHash -> version
 }
 
-// Python embeddable versions for Windows (amd64)
-const PYTHON_VERSIONS = [
+interface PythonVersion {
+  version: string
+  url: string
+}
+
+// Default Python embeddable versions for Windows (amd64)
+const DEFAULT_PYTHON_VERSIONS: PythonVersion[] = [
   {
     version: '3.7.9',
-    url: 'https://www.python.org/ftp/python/3.7.9/python-3.7.9-embed-amd64.zip'
+    url: 'https://xindamate-1308187607.cos.ap-guangzhou.myqcloud.com/python/python-3.7.9-embed-amd64.zip'
   },
   {
     version: '3.8.10',
-    url: 'https://www.python.org/ftp/python/3.8.10/python-3.8.10-embed-amd64.zip'
+    url: 'https://xindamate-1308187607.cos.ap-guangzhou.myqcloud.com/python/python-3.8.10-embed-amd64.zip'
   },
   {
     version: '3.9.13',
-    url: 'https://www.python.org/ftp/python/3.9.13/python-3.9.13-embed-amd64.zip'
+    url: 'https://xindamate-1308187607.cos.ap-guangzhou.myqcloud.com/python/python-3.9.13-embed-amd64.zip'
   },
   {
     version: '3.10.11',
-    url: 'https://www.python.org/ftp/python/3.10.11/python-3.10.11-embed-amd64.zip'
+    url: 'https://xindamate-1308187607.cos.ap-guangzhou.myqcloud.com/python/python-3.10.11-embed-amd64.zip'
   },
   {
     version: '3.11.9',
-    url: 'https://www.python.org/ftp/python/3.11.9/python-3.11.9-embed-amd64.zip'
+    url: 'https://xindamate-1308187607.cos.ap-guangzhou.myqcloud.com/python/python-3.11.9-embed-amd64.zip'
   },
   {
     version: '3.12.7',
-    url: 'https://www.python.org/ftp/python/3.12.7/python-3.12.7-embed-amd64.zip'
+    url: 'https://xindamate-1308187607.cos.ap-guangzhou.myqcloud.com/python/python-3.12.7-embed-amd64.zip'
   },
   {
     version: '3.13.0',
-    url: 'https://www.python.org/ftp/python/3.13.0/python-3.13.0-embed-amd64.zip'
+    url: 'https://xindamate-1308187607.cos.ap-guangzhou.myqcloud.com/python/python-3.13.0-embed-amd64.zip'
   }
 ]
 
@@ -57,19 +62,54 @@ export class PythonManager {
   private pythonsDir: string
   private registryPath: string
   private registry: PythonRegistry
+  private urlConfigPath: string
+  private pythonVersions: PythonVersion[]
 
   constructor() {
     this.pythonsDir = path.join(app.getPath('userData'), 'pythons')
     this.registryPath = path.join(app.getPath('userData'), 'python-versions.json')
+    this.urlConfigPath = path.join(app.getPath('userData'), 'python-urls.json')
     this.registry = this.loadRegistry()
+    this.pythonVersions = this.loadPythonUrls()
     fs.ensureDirSync(this.pythonsDir)
+  }
+
+  /**
+   * Load Python download URLs from config file, falling back to defaults
+   */
+  private loadPythonUrls(): PythonVersion[] {
+    if (fs.existsSync(this.urlConfigPath)) {
+      try {
+        const customUrls = fs.readJsonSync(this.urlConfigPath)
+        console.log(`Loaded custom Python URLs from ${this.urlConfigPath}`)
+        return customUrls
+      } catch (error) {
+        console.error('Error loading Python URL config, using defaults:', error)
+      }
+    } else {
+      // Create default config file on first run
+      this.savePythonUrls(DEFAULT_PYTHON_VERSIONS)
+      console.log(`Created default Python URL config at ${this.urlConfigPath}`)
+    }
+    return DEFAULT_PYTHON_VERSIONS
+  }
+
+  /**
+   * Save Python download URLs to config file
+   */
+  private savePythonUrls(versions: PythonVersion[]): void {
+    try {
+      fs.writeJsonSync(this.urlConfigPath, versions, { spaces: 2 })
+    } catch (error) {
+      console.error('Error saving Python URL config:', error)
+    }
   }
 
   /**
    * Download and install a Python version
    */
   async downloadPython(version: string, onProgress: (percent: number) => void): Promise<string> {
-    const versionData = PYTHON_VERSIONS.find((v) => v.version === version)
+    const versionData = this.pythonVersions.find((v) => v.version === version)
     if (!versionData) {
       throw new Error(`Unsupported version: ${version}`)
     }
@@ -137,16 +177,38 @@ export class PythonManager {
         console.log(`Updated ${pthFile} to enable site packages`)
       }
 
-      // 2. Download get-pip.py
+      // 2. Download get-pip.py (use version-specific URL for older Python versions)
       const getPipPath = path.join(installDir, 'get-pip.py')
       console.log('Downloading get-pip.py...')
-      await this.downloadFile('https://bootstrap.pypa.io/get-pip.py', getPipPath, () => {})
+
+      // Determine the correct get-pip.py URL based on Python version
+      const [major, minor] = version.split('.').map(Number)
+      let getPipUrl = 'https://bootstrap.pypa.io/get-pip.py' // Default for Python 3.9+
+
+      if (major === 3 && minor === 7) {
+        getPipUrl = 'https://bootstrap.pypa.io/pip/3.7/get-pip.py'
+      } else if (major === 3 && minor === 8) {
+        getPipUrl = 'https://bootstrap.pypa.io/pip/3.8/get-pip.py'
+      }
+
+      await this.downloadFile(getPipUrl, getPipPath, () => {})
 
       // 3. Run get-pip.py to install pip
       const pythonExe = path.join(installDir, 'python.exe')
       console.log('Installing pip...')
       await new Promise<void>((resolve, reject) => {
-        const proc = spawn(pythonExe, [getPipPath], { cwd: installDir, shell: true })
+        const proc = spawn(pythonExe, [getPipPath], {
+          cwd: installDir,
+          shell: true,
+          env: {
+            ...process.env,
+            NO_PROXY: '*',
+            HTTP_PROXY: '',
+            HTTPS_PROXY: '',
+            http_proxy: '',
+            https_proxy: ''
+          }
+        })
 
         let output = ''
         proc.stdout?.on('data', (data) => {
@@ -171,7 +233,18 @@ export class PythonManager {
       console.log('Installing virtualenv...')
       const pipExe = path.join(installDir, 'Scripts', 'pip.exe')
       await new Promise<void>((resolve, reject) => {
-        const proc = spawn(pipExe, ['install', 'virtualenv'], { cwd: installDir, shell: true })
+        const proc = spawn(pipExe, ['install', 'virtualenv'], {
+          cwd: installDir,
+          shell: true,
+          env: {
+            ...process.env,
+            NO_PROXY: '*',
+            HTTP_PROXY: '',
+            HTTPS_PROXY: '',
+            http_proxy: '',
+            https_proxy: ''
+          }
+        })
 
         let output = ''
         proc.stdout?.on('data', (data) => {
@@ -289,7 +362,7 @@ export class PythonManager {
    * Get list of downloadable Python versions
    */
   getAvailableVersions(): string[] {
-    return PYTHON_VERSIONS.map((v) => v.version)
+    return this.pythonVersions.map((v) => v.version)
   }
 
   /**

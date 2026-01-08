@@ -59,6 +59,19 @@ interface IElectronAPI {
     message?: string
     error?: string
   }>
+  // Project Import
+  selectOtreezipFile: () => Promise<string[]>
+  importOtreezip: (params: {
+    otreezipPath: string
+    targetPath: string
+    extractedFolderName?: string
+  }) => Promise<{
+    success: boolean
+    projectPath?: string
+    message?: string
+    error?: string
+    requiredPythonVersion?: string
+  }>
   // Listeners
   onLogs: (callback: (log: string) => void) => void
   onStatusChange: (callback: (status: string) => void) => void
@@ -77,6 +90,7 @@ interface IElectronAPI {
   onProjectCreationProgress: (
     callback: (data: { percent: number; status: string; projectName: string }) => void
   ) => void
+  onImportProgress: (callback: (data: { percent: number; status: string }) => void) => void
   removeAllListeners: () => void
 }
 
@@ -240,6 +254,69 @@ const App: React.FC = () => {
       setProjectPath(path)
       setInstallStatus('idle') // Reset first
       window.api.checkRequirements(path, settings.pythonCommand) // Check if already installed
+    }
+  }
+
+  const handleImportOtreezip = async (): Promise<void> => {
+    try {
+      // Step 1: Select .otreezip file
+      const zipResult = await window.api.selectOtreezipFile()
+      if (!zipResult || zipResult.length === 0) {
+        return // User cancelled
+      }
+      const otreezipPath = zipResult[0]
+
+      // Step 2: Select destination folder
+      const folderResult = await window.api.selectFolder()
+      if (!folderResult || folderResult.length === 0) {
+        return // User cancelled
+      }
+      const targetPath = folderResult[0]
+
+      // Step 3: Import the project
+      setLogs((prev) => [...prev, '[SYSTEM] Importing .otreezip file...\n'])
+
+      const importResult = await window.api.importOtreezip({
+        otreezipPath,
+        targetPath
+      })
+
+      if (importResult.success && importResult.projectPath) {
+        setLogs((prev) => [
+          ...prev,
+          `[SYSTEM] ✓ ${importResult.message || 'Project imported successfully'}\n`
+        ])
+
+        // Alert user about required Python version if detected
+        if (importResult.requiredPythonVersion) {
+          setLogs((prev) => [
+            ...prev,
+            `[SYSTEM] ⚠️  This project requires Python ${importResult.requiredPythonVersion}\n`,
+            `[SYSTEM] Current Python: ${settings.pythonCommand}\n`,
+            `[SYSTEM] Please ensure you have the correct Python version before installing requirements.\n`
+          ])
+          alert(
+            `Python Version Required\n\n` +
+            `This project requires Python ${importResult.requiredPythonVersion}.\n\n` +
+            `Current selected Python: ${settings.pythonCommand}\n\n` +
+            `Please make sure you have Python ${importResult.requiredPythonVersion} installed and selected before installing requirements.`
+          )
+        }
+
+        setProjectPath(importResult.projectPath)
+        setInstallStatus('idle')
+        window.api.checkRequirements(importResult.projectPath, settings.pythonCommand)
+      } else {
+        setLogs((prev) => [
+          ...prev,
+          `[SYSTEM] ✗ Import failed: ${importResult.error || 'Unknown error'}\n`
+        ])
+      }
+    } catch (error) {
+      setLogs((prev) => [
+        ...prev,
+        `[SYSTEM] ✗ Error importing project: ${error instanceof Error ? error.message : 'Unknown error'}\n`
+      ])
     }
   }
 
@@ -448,12 +525,36 @@ const App: React.FC = () => {
                   : 'No folder selected'}
               </span>
             </div>
-            <button
-              onClick={handleSelectFolder}
-              className="w-full bg-secondary hover:bg-secondary/80 text-secondary-foreground h-10 px-4 py-2 rounded-md text-sm font-medium transition-colors"
-            >
-              Change Folder
-            </button>
+            <div className="flex gap-2">
+              <button
+                onClick={handleSelectFolder}
+                className="flex-1 bg-secondary hover:bg-secondary/80 text-secondary-foreground h-10 px-4 py-2 rounded-md text-sm font-medium transition-colors"
+              >
+                Change Folder
+              </button>
+              <button
+                onClick={handleImportOtreezip}
+                className="flex-1 bg-green-600 hover:bg-green-500 text-white h-10 px-4 py-2 rounded-md text-sm font-medium transition-colors flex items-center justify-center gap-2"
+                title="Import a project from .otreezip file"
+              >
+                <svg
+                  xmlns="http://www.w3.org/2000/svg"
+                  width="16"
+                  height="16"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="2"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                >
+                  <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                  <polyline points="7 10 12 15 17 10" />
+                  <line x1="12" x2="12" y1="15" y2="3" />
+                </svg>
+                Import .otreezip
+              </button>
+            </div>
           </div>
         </div>
 

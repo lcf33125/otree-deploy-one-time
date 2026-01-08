@@ -67,3 +67,23 @@ export interface ProjectCreationProgress {
   projectName: string
 }
 
+// Project import types
+export interface ImportOtreezipParams {
+  otreezipPath: string
+  targetPath: string
+  extractedFolderName?: string
+}
+
+export interface ImportOtreezipResult {
+  success: boolean
+  projectPath?: string
+  message?: string
+  error?: string
+  requiredPythonVersion?: string
+}
+
+export interface ImportProgress {
+  percent: number
+  status: string
+}
+

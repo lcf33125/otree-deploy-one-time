@@ -38,6 +38,10 @@ const api = {
   createOtreeProject: (params) => ipcRenderer.invoke('otree:create-project', params),
   validateOtreeProject: (projectPath) => ipcRenderer.invoke('otree:validate-project', projectPath),
 
+  // Project Import
+  selectOtreezipFile: () => ipcRenderer.invoke('otree:select-otreezip'),
+  importOtreezip: (params) => ipcRenderer.invoke('otree:import-otreezip', params),
+
   // Listeners
   onLogs: (callback) => ipcRenderer.on('otree:logs', (_event, value) => callback(value)),
   onStatusChange: (callback) => ipcRenderer.on('otree:status', (_event, value) => callback(value)),
@@ -53,6 +57,8 @@ const api = {
     ipcRenderer.on('python:download-status', (_event, value) => callback(value)),
   onProjectCreationProgress: (callback) =>
     ipcRenderer.on('otree:creation-progress', (_event, value) => callback(value)),
+  onImportProgress: (callback) =>
+    ipcRenderer.on('otree:import-progress', (_event, value) => callback(value)),
   removeAllListeners: () => {
     ipcRenderer.removeAllListeners('otree:logs')
     ipcRenderer.removeAllListeners('otree:status')
@@ -62,6 +68,7 @@ const api = {
     ipcRenderer.removeAllListeners('python:download-progress')
     ipcRenderer.removeAllListeners('python:download-status')
     ipcRenderer.removeAllListeners('otree:creation-progress')
+    ipcRenderer.removeAllListeners('otree:import-progress')
   }
 }
 

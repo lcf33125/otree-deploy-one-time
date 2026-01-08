@@ -10,7 +10,7 @@ interface WelcomeWizardProps {
 }
 
 type WizardStep = 'welcome' | 'python' | 'project' | 'complete'
-type ProjectSetupOption = 'create' | 'open' | 'skip'
+type ProjectSetupOption = 'create' | 'open' | 'import' | 'skip'
 
 const WelcomeWizard: React.FC<WelcomeWizardProps> = ({ onComplete, onSkip }) => {
   const [currentStep, setCurrentStep] = useState<WizardStep>('welcome')
@@ -30,6 +30,12 @@ const WelcomeWizard: React.FC<WelcomeWizardProps> = ({ onComplete, onSkip }) => 
   const [createdProjectPath, setCreatedProjectPath] = useState('')
   const [creationProgress, setCreationProgress] = useState({ percent: 0, status: '' })
 
+  // Import state
+  const [otreezipPath, setOtreezipPath] = useState('')
+  const [extractLocation, setExtractLocation] = useState('')
+  const [isImporting, setIsImporting] = useState(false)
+  const [importProgress, setImportProgress] = useState({ percent: 0, status: '' })
+
   // Auto-scan for Python when reaching the Python step
   useEffect(() => {
     if (currentStep === 'python' && pythonVersions.length === 0 && !isScanning) {
@@ -43,6 +49,7 @@ const WelcomeWizard: React.FC<WelcomeWizardProps> = ({ onComplete, onSkip }) => 
       try {
         const documentsPath = await window.api.getDocumentsPath()
         setProjectLocation(documentsPath)
+        setExtractLocation(documentsPath) // Also set for import
       } catch (error) {
         console.error('Failed to get documents path:', error)
       }
@@ -57,6 +64,19 @@ const WelcomeWizard: React.FC<WelcomeWizardProps> = ({ onComplete, onSkip }) => 
     }
 
     window.api.onProjectCreationProgress(handleProgress)
+
+    return () => {
+      // Cleanup listener
+    }
+  }, [])
+
+  // Listen for import progress
+  useEffect(() => {
+    const handleImportProgress = (data: { percent: number; status: string }) => {
+      setImportProgress({ percent: data.percent, status: data.status })
+    }
+
+    window.api.onImportProgress(handleImportProgress)
 
     return () => {
       // Cleanup listener
@@ -188,6 +208,64 @@ const WelcomeWizard: React.FC<WelcomeWizardProps> = ({ onComplete, onSkip }) => 
       setCurrentStep('complete')
     } else {
       alert(result.message || 'Not a valid oTree project')
+    }
+  }
+
+  const handleBrowseOtreezip = async () => {
+    try {
+      const result = await window.api.selectOtreezipFile()
+      if (result && result.length > 0) {
+        setOtreezipPath(result[0])
+      }
+    } catch (error) {
+      console.error('Failed to select .otreezip file:', error)
+    }
+  }
+
+  const handleBrowseExtractLocation = async () => {
+    try {
+      const result = await window.api.selectFolder()
+      if (result && result.length > 0) {
+        setExtractLocation(result[0])
+      }
+    } catch (error) {
+      console.error('Failed to select folder:', error)
+    }
+  }
+
+  const handleImportOtreezip = async () => {
+    if (!otreezipPath || !extractLocation) {
+      alert('Please select both .otreezip file and extraction location')
+      return
+    }
+
+    setIsImporting(true)
+    setImportProgress({ percent: 0, status: 'Starting import...' })
+
+    try {
+      const result = await window.api.importOtreezip({
+        otreezipPath,
+        targetPath: extractLocation
+      })
+
+      if (result.success && result.projectPath) {
+        setCreatedProjectPath(result.projectPath)
+
+        // Alert user about required Python version if detected
+        if (result.requiredPythonVersion) {
+          const message = `This project requires Python ${result.requiredPythonVersion}.\n\nCurrent selected Python: ${selectedPython?.version || 'None'}\n\nPlease make sure you have Python ${result.requiredPythonVersion} installed and selected before installing requirements.`
+          alert(message)
+        }
+
+        setCurrentStep('complete')
+      } else {
+        alert(result.error || 'Failed to import project')
+      }
+    } catch (error) {
+      console.error('Failed to import .otreezip:', error)
+      alert('An error occurred while importing the project')
+    } finally {
+      setIsImporting(false)
     }
   }
 
@@ -508,7 +586,40 @@ const WelcomeWizard: React.FC<WelcomeWizardProps> = ({ onComplete, onSkip }) => 
               </div>
             </button>
 
-            {/* Option 3: Skip */}
+            {/* Option 3: Import from oTreeHub */}
+            <button
+              onClick={() => setProjectSetupOption('import')}
+              className="w-full text-left p-5 rounded-lg border border-border hover:border-green-500 hover:bg-green-500/5 transition-all group"
+            >
+              <div className="flex items-start gap-4">
+                <div className="w-12 h-12 rounded-lg bg-green-500/20 flex items-center justify-center shrink-0 group-hover:bg-green-500/30 transition-colors">
+                  <svg
+                    xmlns="http://www.w3.org/2000/svg"
+                    width="24"
+                    height="24"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="2"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    className="text-green-400"
+                  >
+                    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                    <polyline points="7 10 12 15 17 10" />
+                    <line x1="12" x2="12" y1="15" y2="3" />
+                  </svg>
+                </div>
+                <div className="flex-1">
+                  <h3 className="font-semibold text-lg">Import from oTreeHub</h3>
+                  <p className="text-sm text-muted-foreground mt-1">
+                    Import a project from an <code className="text-xs bg-secondary px-1 py-0.5 rounded">.otreezip</code> file downloaded from oTreeHub
+                  </p>
+                </div>
+              </div>
+            </button>
+
+            {/* Option 4: Skip */}
             <button
               onClick={() => {
                 setProjectSetupOption('skip')
@@ -858,6 +969,160 @@ const WelcomeWizard: React.FC<WelcomeWizardProps> = ({ onComplete, onSkip }) => 
               className="flex-1 h-12 px-6 rounded-md bg-blue-600 hover:bg-blue-500 text-white font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-blue-600"
             >
               Open Project
+            </button>
+          </div>
+        </div>
+      )
+    }
+
+    // Import from oTreeHub Sub-interface
+    if (projectSetupOption === 'import') {
+      return (
+        <div className="space-y-6">
+          <div className="space-y-2">
+            <h2 className="text-2xl font-bold">Import from oTreeHub</h2>
+            <p className="text-muted-foreground">
+              Select the .otreezip file you downloaded from oTreeHub
+            </p>
+          </div>
+
+          <div className="bg-card border border-border rounded-lg p-6 space-y-4">
+            {/* .otreezip file selector */}
+            <div className="space-y-2">
+              <label className="text-sm font-medium">.otreezip File</label>
+              <div className="flex gap-2">
+                <input
+                  type="text"
+                  value={otreezipPath}
+                  readOnly
+                  placeholder="Select your .otreezip file..."
+                  className="flex-1 px-3 py-2 bg-background border border-border rounded-md focus:outline-none focus:ring-2 focus:ring-green-500"
+                />
+                <button
+                  onClick={handleBrowseOtreezip}
+                  disabled={isImporting}
+                  className="px-4 py-2 border border-border rounded-md hover:bg-secondary transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  Browse
+                </button>
+              </div>
+              {otreezipPath && (
+                <p className="text-xs text-muted-foreground truncate" title={otreezipPath}>
+                  Selected: {otreezipPath}
+                </p>
+              )}
+            </div>
+
+            {/* Extraction location */}
+            <div className="space-y-2">
+              <label className="text-sm font-medium">Extract To</label>
+              <div className="flex gap-2">
+                <input
+                  type="text"
+                  value={extractLocation}
+                  onChange={(e) => setExtractLocation(e.target.value)}
+                  placeholder="Select destination folder..."
+                  className="flex-1 px-3 py-2 bg-background border border-border rounded-md focus:outline-none focus:ring-2 focus:ring-green-500"
+                />
+                <button
+                  onClick={handleBrowseExtractLocation}
+                  disabled={isImporting}
+                  className="px-4 py-2 border border-border rounded-md hover:bg-secondary transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  Browse
+                </button>
+              </div>
+              <p className="text-xs text-muted-foreground">
+                The project will be extracted to this location
+              </p>
+            </div>
+
+            {/* Info box */}
+            <div className="bg-blue-500/10 border border-blue-500/20 rounded-lg p-4">
+              <p className="text-sm text-blue-400">
+                <strong>About .otreezip files:</strong> These are special project archives from oTreeHub containing complete oTree experiments ready to use.
+              </p>
+            </div>
+          </div>
+
+          {/* Progress indicator */}
+          {isImporting && (
+            <div className="bg-green-500/10 border border-green-500/20 rounded-lg p-4">
+              <div className="flex items-center gap-3 mb-2">
+                <svg
+                  className="animate-spin h-5 w-5 text-green-400"
+                  xmlns="http://www.w3.org/2000/svg"
+                  fill="none"
+                  viewBox="0 0 24 24"
+                >
+                  <circle
+                    className="opacity-25"
+                    cx="12"
+                    cy="12"
+                    r="10"
+                    stroke="currentColor"
+                    strokeWidth="4"
+                  ></circle>
+                  <path
+                    className="opacity-75"
+                    fill="currentColor"
+                    d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"
+                  ></path>
+                </svg>
+                <span className="text-sm font-medium text-green-400">{importProgress.status}</span>
+              </div>
+              <div className="w-full bg-background rounded-full h-2">
+                <div
+                  className="bg-green-500 h-2 rounded-full transition-all duration-300"
+                  style={{ width: `${importProgress.percent}%` }}
+                ></div>
+              </div>
+              <p className="text-xs text-muted-foreground mt-2">
+                {importProgress.percent}% complete
+              </p>
+            </div>
+          )}
+
+          <div className="flex gap-3">
+            <button
+              onClick={() => setProjectSetupOption(null)}
+              disabled={isImporting}
+              className="px-6 h-12 rounded-md border border-border hover:bg-secondary transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              Back
+            </button>
+            <button
+              onClick={handleImportOtreezip}
+              disabled={!otreezipPath || !extractLocation || isImporting}
+              className="flex-1 h-12 px-6 rounded-md bg-green-600 hover:bg-green-500 text-white font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-green-600 flex items-center justify-center gap-2"
+            >
+              {isImporting ? (
+                <>
+                  <svg
+                    className="animate-spin h-4 w-4"
+                    xmlns="http://www.w3.org/2000/svg"
+                    fill="none"
+                    viewBox="0 0 24 24"
+                  >
+                    <circle
+                      className="opacity-25"
+                      cx="12"
+                      cy="12"
+                      r="10"
+                      stroke="currentColor"
+                      strokeWidth="4"
+                    ></circle>
+                    <path
+                      className="opacity-75"
+                      fill="currentColor"
+                      d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"
+                    ></path>
+                  </svg>
+                  Importing...
+                </>
+              ) : (
+                'Import Project'
+              )}
             </button>
           </div>
         </div>

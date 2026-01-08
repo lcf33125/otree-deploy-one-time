@@ -8,7 +8,7 @@ import util from 'util'
 import crypto from 'crypto'
 import { getPythonManager } from './python-manager'
 import { IPC_CHANNELS, DEFAULT_OTREE_PORT, DOCKER_COMPOSE_FILENAME, LOG_DIR, STATUS_MESSAGES, SYSTEM_MESSAGES, ERROR_CODES } from './constants'
-import type { DockerComposeConfig, VenvPaths, CreateProjectParams, CreateProjectResult, ValidateProjectResult } from './types'
+import type { DockerComposeConfig, VenvPaths, CreateProjectParams, CreateProjectResult, ValidateProjectResult, ImportOtreezipParams, ImportOtreezipResult, ImportProgress } from './types'
 import { validateProjectPath, validateFilePath, generateSecurePassword, isManagedPython } from './utils'
 
 const execAsync = util.promisify(exec)
@@ -85,8 +85,16 @@ const logToUIAndFile = (window: BrowserWindow, msg: string): void => {
 
 // Helper: Kill process by PID on Windows
 const killProcessByPid = async (pid: number): Promise<void> => {
+  // Validate PID - 0 and negative PIDs are invalid
+  if (!pid || pid <= 0) {
+    console.warn(`Invalid PID ${pid}, skipping kill`)
+    return
+  }
+
   try {
-    await execAsync(`taskkill /pid ${pid} /T /F`)
+    // Use chcp 65001 to set UTF-8 encoding before running taskkill
+    // This fixes the encoding issues with Chinese Windows systems
+    await execAsync(`chcp 65001>nul && taskkill /pid ${pid} /T /F`, { encoding: 'utf8' })
   } catch (error) {
     console.error(`Failed to kill process ${pid}:`, error)
   }
@@ -95,14 +103,19 @@ const killProcessByPid = async (pid: number): Promise<void> => {
 // Helper: Kill process by port on Windows
 const killProcessByPort = async (port: number): Promise<void> => {
   try {
-    const { stdout } = await execAsync(`netstat -ano | findstr :${port}`)
+    // Use chcp 65001 for UTF-8 encoding
+    const { stdout } = await execAsync(`chcp 65001>nul && netstat -ano | findstr :${port}`, { encoding: 'utf8' })
     if (stdout) {
       const lines = stdout.trim().split('\n')
       const killPromises = lines.map(async (line) => {
         const parts = line.trim().split(/\s+/)
         const pid = parts[parts.length - 1]
         if (pid && /^\d+$/.test(pid)) {
-          await killProcessByPid(parseInt(pid, 10))
+          const pidNum = parseInt(pid, 10)
+          // Validate PID before attempting to kill
+          if (pidNum > 0) {
+            await killProcessByPid(pidNum)
+          }
         }
       })
       await Promise.all(killPromises)
@@ -315,9 +328,21 @@ export const setupOtreeHandlers = (mainWindow: BrowserWindow): void => {
             if (!fs.existsSync(virtualenvExe)) {
               sendStatus(mainWindow, 'Installing virtualenv (first-time setup)...')
               await new Promise<void>((resolve, reject) => {
+                // Prepare environment without proxy settings
+                const pipEnv = { ...process.env }
+                delete pipEnv.HTTP_PROXY
+                delete pipEnv.HTTPS_PROXY
+                delete pipEnv.http_proxy
+                delete pipEnv.https_proxy
+                delete pipEnv.ALL_PROXY
+                delete pipEnv.all_proxy
+                delete pipEnv.NO_PROXY
+                delete pipEnv.no_proxy
+
                 // Removed shell: true for security
-                const installProcess = spawn(pipExe, ['install', 'virtualenv'], {
-                  cwd: pythonDir
+                const installProcess = spawn(pipExe, ['install', '--no-proxy', 'virtualenv'], {
+                  cwd: pythonDir,
+                  env: pipEnv
                 })
 
                 let output = ''
@@ -400,15 +425,27 @@ export const setupOtreeHandlers = (mainWindow: BrowserWindow): void => {
 
         if (hasRequirements) {
           sendStatus(mainWindow, STATUS_MESSAGES.INSTALLING_REQUIREMENTS)
-          args = ['install', '-r', 'requirements.txt']
+          args = ['install', '--no-proxy', '-r', 'requirements.txt']
         } else {
           sendStatus(mainWindow, STATUS_MESSAGES.INSTALLING_OTREE)
           // Install otree and commonly needed packages
-          args = ['install', 'otree']
+          args = ['install', '--no-proxy', 'otree']
         }
 
+        // Prepare environment without proxy settings
+        const env = { ...process.env }
+        // Remove proxy-related environment variables
+        delete env.HTTP_PROXY
+        delete env.HTTPS_PROXY
+        delete env.http_proxy
+        delete env.https_proxy
+        delete env.ALL_PROXY
+        delete env.all_proxy
+        delete env.NO_PROXY
+        delete env.no_proxy
+
         // Removed shell: true for security
-        const installProcess = spawn(cmd, args, { cwd: validatedPath })
+        const installProcess = spawn(cmd, args, { cwd: validatedPath, env })
 
         if (installProcess.stdout) {
           installProcess.stdout.on('data', (data: Buffer) => {
@@ -792,11 +829,23 @@ export const setupOtreeHandlers = (mainWindow: BrowserWindow): void => {
       const pythonDir = path.dirname(pythonPath)
       const pipExe = path.join(pythonDir, 'Scripts', 'pip.exe')
 
+      // Prepare environment without proxy settings
+      const pipEnv = { ...process.env }
+      delete pipEnv.HTTP_PROXY
+      delete pipEnv.HTTPS_PROXY
+      delete pipEnv.http_proxy
+      delete pipEnv.https_proxy
+      delete pipEnv.ALL_PROXY
+      delete pipEnv.all_proxy
+      delete pipEnv.NO_PROXY
+      delete pipEnv.no_proxy
+
       // Reinstall virtualenv
       await new Promise<void>((resolve, reject) => {
         // Removed shell: true for security
-        const proc = spawn(pipExe, ['install', '--force-reinstall', 'virtualenv'], {
-          cwd: pythonDir
+        const proc = spawn(pipExe, ['install', '--no-proxy', '--force-reinstall', 'virtualenv'], {
+          cwd: pythonDir,
+          env: pipEnv
         })
 
         let output = ''
@@ -935,7 +984,53 @@ export const setupOtreeHandlers = (mainWindow: BrowserWindow): void => {
           })
 
           try {
-            await execAsync(`"${pythonPath}" -m pip install otree`)
+            // Prepare environment without proxy settings
+            const pipEnv = { ...process.env }
+            delete pipEnv.HTTP_PROXY
+            delete pipEnv.HTTPS_PROXY
+            delete pipEnv.http_proxy
+            delete pipEnv.https_proxy
+            delete pipEnv.ALL_PROXY
+            delete pipEnv.all_proxy
+            delete pipEnv.NO_PROXY
+            delete pipEnv.no_proxy
+
+            // Create pip install command with --no-proxy flag
+            const pipCmd = process.platform === 'win32'
+              ? path.join(pythonDir, 'Scripts', 'pip.exe')
+              : path.join(pythonDir, 'bin', 'pip')
+
+            await new Promise<void>((resolve, reject) => {
+              const installProcess = spawn(pipCmd, ['install', '--no-proxy', 'otree'], {
+                cwd: pythonDir,
+                env: pipEnv
+              })
+
+              let output = ''
+              let errorOutput = ''
+
+              installProcess.stdout?.on('data', (data) => {
+                output += data.toString()
+                console.log('[pip install otree]:', data.toString())
+              })
+
+              installProcess.stderr?.on('data', (data) => {
+                errorOutput += data.toString()
+                console.error('[pip install otree error]:', data.toString())
+              })
+
+              installProcess.on('close', (code) => {
+                if (code === 0) {
+                  resolve()
+                } else {
+                  reject(new Error(`Failed to install oTree: ${errorOutput || output}`))
+                }
+              })
+
+              installProcess.on('error', (err) => {
+                reject(new Error(`Failed to run pip: ${err.message}`))
+              })
+            })
 
             // Verify installation
             if (!await fs.pathExists(otreeCmd)) {
@@ -1115,6 +1210,211 @@ export const setupOtreeHandlers = (mainWindow: BrowserWindow): void => {
     }
   )
 
+  // 21. Handler: Select .otreezip file
+  ipcMain.handle(IPC_CHANNELS.OTREE_SELECT_OTREEZIP, async () => {
+    const result = await dialog.showOpenDialog(mainWindow, {
+      properties: ['openFile'],
+      filters: [
+        { name: 'oTree Project Files', extensions: ['otreezip'] },
+        { name: 'All Files', extensions: ['*'] }
+      ]
+    })
+    console.log('[Select .otreezip] Selected paths:', result.filePaths)
+    return result.filePaths
+  })
+
+  // 22. Handler: Import .otreezip file
+  ipcMain.handle(
+    IPC_CHANNELS.OTREE_IMPORT_OTREEZIP,
+    async (_event, params: ImportOtreezipParams): Promise<ImportOtreezipResult> => {
+      const { otreezipPath, targetPath } = params
+
+      try {
+        // Validate inputs
+        if (!otreezipPath || !targetPath) {
+          return {
+            success: false,
+            error: 'Missing required parameters'
+          }
+        }
+
+        // Helper function to send progress updates
+        const sendProgress = (percent: number, status: string): void => {
+          const progress: ImportProgress = { percent, status }
+          mainWindow.webContents.send(IPC_CHANNELS.OTREE_IMPORT_PROGRESS, progress)
+        }
+
+        sendProgress(5, 'Validating .otreezip file...')
+
+        // Validate zip file exists
+        const zipExists = await fs.pathExists(otreezipPath)
+        if (!zipExists) {
+          return {
+            success: false,
+            error: 'Selected .otreezip file not found'
+          }
+        }
+
+        // Ensure target directory exists
+        await fs.ensureDir(targetPath)
+
+        sendProgress(10, 'Extracting project files using oTree...')
+
+        // Get extracted project name from filename (without extension)
+        const fileBaseName = path.basename(otreezipPath, '.otreezip')
+        const extractedProjectPath = path.join(targetPath, fileBaseName)
+
+        // Check if destination already exists
+        if (await fs.pathExists(extractedProjectPath)) {
+          return {
+            success: false,
+            error: `A project with this name already exists at: ${extractedProjectPath}`
+          }
+        }
+
+        try {
+          // Use oTree's built-in unzip command
+          // The command extracts to current directory, so we need to work in target directory
+          await new Promise<void>((resolve, reject) => {
+            const otreeCmd = process.platform === 'win32' ? 'otree.exe' : 'otree'
+            const args = ['unzip', otreezipPath]
+
+            const extractProcess = spawn(otreeCmd, args, {
+              cwd: targetPath,
+              shell: false
+            })
+
+            let output = ''
+            let errorOutput = ''
+
+            extractProcess.stdout?.on('data', (data) => {
+              output += data.toString()
+              console.log('[otree unzip]:', data.toString())
+              sendProgress(50, 'Extracting files...')
+            })
+
+            extractProcess.stderr?.on('data', (data) => {
+              errorOutput += data.toString()
+              console.error('[otree unzip error]:', data.toString())
+            })
+
+            extractProcess.on('close', (code) => {
+              if (code === 0) {
+                sendProgress(70, 'Extraction complete')
+                resolve()
+              } else {
+                reject(
+                  new Error(
+                    `oTree unzip failed with code ${code}. ${errorOutput || output || 'Make sure oTree is installed in your Python environment.'}`
+                  )
+                )
+              }
+            })
+
+            extractProcess.on('error', (err) => {
+              reject(
+                new Error(
+                  `Failed to run oTree command: ${err.message}. Make sure oTree is installed in your Python environment.`
+                )
+              )
+            })
+          })
+
+          sendProgress(80, 'Validating extracted project...')
+
+          // Verify the extracted project exists
+          if (!(await fs.pathExists(extractedProjectPath))) {
+            return {
+              success: false,
+              error: `Extraction succeeded but project not found at expected location: ${extractedProjectPath}`
+            }
+          }
+
+          sendProgress(90, 'Validating oTree project structure...')
+
+          // Validate it's a proper oTree project
+          const validation = await validateOtreeProjectInternal(extractedProjectPath)
+          if (!validation.isValid) {
+            // If validation fails, clean up the extracted files
+            await fs.remove(extractedProjectPath)
+            return {
+              success: false,
+              error: validation.message || 'Extracted files are not a valid oTree project'
+            }
+          }
+
+          // Check for runtime.txt and parse Python version
+          let requiredPythonVersion: string | undefined
+          try {
+            const runtimePath = path.join(extractedProjectPath, 'runtime.txt')
+            if (await fs.pathExists(runtimePath)) {
+              const runtimeContent = await fs.readFile(runtimePath, 'utf-8')
+              // Parse Python version from format like "python-3.7" or "3.7"
+              const match = runtimeContent.trim().match(/python-?(\d+\.\d+)/i)
+              if (match && match[1]) {
+                requiredPythonVersion = match[1]
+                console.log(`[Import] Found required Python version: ${requiredPythonVersion}`)
+              }
+            }
+          } catch (error) {
+            console.warn('Could not read runtime.txt:', error)
+            // Continue without version info - not critical
+          }
+
+          sendProgress(100, 'Import complete!')
+
+          return {
+            success: true,
+            projectPath: extractedProjectPath,
+            message: `Project imported successfully to ${extractedProjectPath}`,
+            requiredPythonVersion
+          }
+        } catch (extractError) {
+          // Cleanup on error if directory was created
+          if (await fs.pathExists(extractedProjectPath)) {
+            await fs.remove(extractedProjectPath)
+          }
+          throw extractError
+        }
+      } catch (error) {
+        console.error('[Import .otreezip] Error:', error)
+        return {
+          success: false,
+          error: error instanceof Error ? error.message : 'Failed to import .otreezip file'
+        }
+      }
+    }
+  )
+
+}
+
+// Helper: Internal validation function (doesn't send IPC events)
+async function validateOtreeProjectInternal(projectPath: string): Promise<{ isValid: boolean; message?: string }> {
+  try {
+    const exists = await fs.pathExists(projectPath)
+    if (!exists) {
+      return { isValid: false, message: 'Directory does not exist' }
+    }
+
+    const stat = await fs.stat(projectPath)
+    if (!stat.isDirectory()) {
+      return { isValid: false, message: 'Path is not a directory' }
+    }
+
+    const settingsPath = path.join(projectPath, 'settings.py')
+    const hasSettings = await fs.pathExists(settingsPath)
+
+    if (!hasSettings) {
+      return { isValid: false, message: 'Not a valid oTree project (missing settings.py)' }
+    }
+
+    return { isValid: true, message: 'Valid oTree project' }
+  } catch (error) {
+    return {
+      isValid: false,
+      message: error instanceof Error ? error.message : 'Validation failed'
+    }
+  }
 }
 
 // Helper: Send status updates

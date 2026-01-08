@@ -45,7 +45,12 @@ export const IPC_CHANNELS = {
   // Project Creation
   OTREE_CREATE_PROJECT: 'otree:create-project',
   OTREE_VALIDATE_PROJECT: 'otree:validate-project',
-  OTREE_PROJECT_CREATION_PROGRESS: 'otree:creation-progress'
+  OTREE_PROJECT_CREATION_PROGRESS: 'otree:creation-progress',
+
+  // Project Import
+  OTREE_SELECT_OTREEZIP: 'otree:select-otreezip',
+  OTREE_IMPORT_OTREEZIP: 'otree:import-otreezip',
+  OTREE_IMPORT_PROGRESS: 'otree:import-progress'
 } as const
 
 // Docker Compose file name
